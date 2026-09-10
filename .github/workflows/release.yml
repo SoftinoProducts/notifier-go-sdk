@@ -1,0 +1,56 @@
+name: Release
+
+# A Go module needs no build step to be "published": the version tag *is* the artifact,
+# and the Go module proxy serves the tagged tree to `go get`. This workflow therefore only
+# re-verifies the tagged commit and records the release in the GitHub UI.
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the generated notes can diff against the previous tag.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Verify the tagged tree
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test -race ./...
+
+      - name: Confirm the module version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(grep -oE 'Version = "[^"]+"' options.go | cut -d'"' -f2)
+          if [ "$tag" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME does not match notifier.Version = $declared in options.go"
+            exit 1
+          fi
+          echo "tag and notifier.Version agree on $declared"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
