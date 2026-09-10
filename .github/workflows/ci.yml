@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared minimum plus the current release, so the go.mod floor stays honest.
+        go: [ '1.22', 'stable' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race + coverage)
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: matrix.go == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # Pinned: the config in .golangci.yml uses the v1 schema.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          args: --timeout=3m
+
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # Local httptest servers only; this records throughput on every change and fails the
+      # build if the allocation-free paths start allocating.
+      - name: Run benchmarks
+        run: go test -run XXX -bench . -benchtime 200x -benchmem ./...
+
+  live:
+    name: Live API (manual)
+    runs-on: ubuntu-latest
+    # Manual only: it talks to a real deployment, and pull requests from forks have no
+    # access to secrets anyway. Read-only unless NOTIFIER_LIVE_SEND is set below.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Live tests
+        env:
+          NOTIFIER_API_KEY: ${{ secrets.NOTIFIER_API_KEY }}
+          NOTIFIER_BASE_URL: ${{ vars.NOTIFIER_BASE_URL }}
+        run: |
+          if [ -z "$NOTIFIER_API_KEY" ]; then
+            echo "::notice::NOTIFIER_API_KEY is not configured; skipping the live tests."
+            exit 0
+          fi
+          go test -run TestLive -v ./...

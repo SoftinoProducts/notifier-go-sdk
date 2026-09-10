@@ -1,0 +1,20 @@
+# Test / coverage output
+*.out
+coverage.html
+coverage.txt
+
+# Build output
+/bin/
+/dist/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

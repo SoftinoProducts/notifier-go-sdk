@@ -1,0 +1,414 @@
+# Notifier Go SDK
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/SoftinoProducts/notifier-go-sdk.svg)](https://pkg.go.dev/github.com/SoftinoProducts/notifier-go-sdk)
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev/dl/)
+
+A Go client for the **Notifier** multi-channel notification hub — SMS, email, web-push and Bale
+behind one API, with the concrete provider (Kavenegar, SMS.ir, SMTP, Centrifugo, …) resolved by the
+service from your tenant's channel configuration.
+
+- **Zero third-party dependencies.** Only the standard library, so `go.mod` stays empty for you.
+- **Idiomatic Go.** `context.Context` everywhere, functional options, typed errors, plain structs.
+- **Fast.** A shared connection pool tuned for concurrency, pooled response buffers, allocation-free
+  parameter rendering, and bulk sends that fan out with bounded parallelism.
+
+```go
+client, err := notifier.NewClient(os.Getenv("NOTIFIER_API_KEY"))
+if err != nil {
+    return err
+}
+
+res, err := client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: "+989120000000",
+    Template:  "verify",
+    Values:    []string{"123456"}, // bound to the template's param_names in order
+})
+if err != nil {
+    return err
+}
+
+fmt.Println(res.ID, res.Status) // 9f1a2b3c-… queued
+```
+
+---
+
+## Install
+
+```bash
+go get github.com/SoftinoProducts/notifier-go-sdk
+```
+
+Requires **Go 1.22 or newer** and a Notifier API key. The default endpoint is
+`https://notifier-api.vibe.ir`; point elsewhere with `WithBaseURL`.
+
+---
+
+## Sending with a template (recommended)
+
+Templates are rendered server-side, so the message text and its localization stay out of your code.
+The service looks the template up by `(channel, name, locale)`.
+
+> **Prerequisite:** the template must declare its `param_names` in the same order you pass `Values`.
+> If you would rather address placeholders by name, use `Vars`.
+
+### Values positionally
+
+```go
+client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: phone,
+    Template:  "verify",                     // template declares param_names ["token"]
+    Values:    []string{"123456"},
+})
+```
+
+### Values by name
+
+```go
+client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: phone,
+    Template:  "order_notice",
+    Vars:      map[string]any{"amount": 50000, "region": "Tehran"},
+})
+```
+
+### Routing through a channel group: `"group:template"`
+
+Prefix the template with a group name and the send routes through that channel group by name:
+
+```go
+client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: phone,
+    Template:  "sms-group:verify",
+    Values:    []string{"123456"},
+})
+```
+
+Equivalent, and useful when the group name is dynamic — an explicit `Group` wins over the prefix:
+
+```go
+client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: phone,
+    Template:  "verify",
+    Group:     "sms-group",
+    Values:    []string{"123456"},
+})
+```
+
+### Scheduling, callbacks and idempotency
+
+`TemplateParams` and `SendParams` both accept the full set of send options:
+
+```go
+sendAt := time.Now().Add(24 * time.Hour)
+
+client.Send(ctx, notifier.SendParams{
+    Channel:        notifier.ChannelEmail,
+    Recipient:      "ops@example.com",
+    Subject:        "Nightly report",
+    Body:           "Everything is fine.",
+    SendAt:         &sendAt,                                   // schedule instead of dispatch now
+    CallbackURL:    "https://your-app/notifier/callback",      // signed delivery callback
+    IdempotencyKey: "nightly-2026-09-10",                      // makes a retry safe
+    Locale:         "en",
+    Metadata:       json.RawMessage(`{"report_id":42}`),
+})
+```
+
+`Metadata` is passed through byte-for-byte, so there is no encoding round trip. Build it from a Go
+value with `notifier.JSON`:
+
+```go
+metadata, err := notifier.JSON(map[string]any{"order_id": 42})
+```
+
+---
+
+## Sending without a template
+
+`SendText` is shorthand for a plain body; `Send` covers everything, including templates by UUID:
+
+```go
+client.SendText(ctx, notifier.ChannelSMS, phone, "Your code is 123456")
+
+client.Send(ctx, notifier.SendParams{
+    Channel:    notifier.ChannelSMS,
+    Recipient:  phone,
+    TemplateID: "3f8b1c2d-0000-1111-2222-333344445555",
+    Vars:       map[string]any{"token": "123456"},
+})
+```
+
+---
+
+## Bulk
+
+Both bulk methods split the input into requests of at most `notifier.MaxBulkMessages` (10 000, the
+service limit) and validate every message **before** the first request goes out, so a bad entry
+cannot leave half the batch dispatched.
+
+- `Bulk` sends the chunks one at a time, in order.
+- `BulkConcurrent` runs a fixed worker pool of `BulkOptions.Concurrency` chunks (default
+  `notifier.DefaultBulkConcurrency`), which is what you want for batches far larger than one chunk.
+
+```go
+messages := []notifier.BulkMessage{
+    {Recipient: "+989120000001", TemplateName: "verify", Values: []string{"111111"}},
+    {Recipient: "+989120000002", TemplateName: "verify", Values: []string{"222222"}},
+}
+
+result, err := client.BulkConcurrent(ctx,
+    notifier.BulkParams{Channel: notifier.ChannelSMS, Messages: messages},
+    notifier.BulkOptions{Concurrency: 4})
+
+fmt.Println(result.Total, "accepted in", len(result.Batches), "batches")
+for _, failure := range result.Failures {
+    log.Printf("messages[%d..%d] rejected: %v",
+        failure.Offset, failure.Offset+failure.Size-1, failure.Err)
+}
+```
+
+A partial success is normal and is **not** an error you can ignore: `err` is non-nil when any chunk
+failed, and the returned `*BulkResult` always describes what was accepted and what was not. Batches
+and failures are reported in input order; the chunk requests themselves are dispatched as workers
+free up, so the service may receive them out of order.
+
+---
+
+## Checking status
+
+Notifier is **asynchronous**: a successful send means the notification was *accepted and queued*.
+The provider has not been contacted yet, so the acknowledgement carries `StatusQueued` and no
+provider detail.
+
+```go
+res, err := client.SendText(ctx, notifier.ChannelSMS, phone, "hello")
+
+// Poll by the Notifier UUID returned by the send.
+current, err := client.Status(ctx, res.ID)
+switch {
+case current.IsDelivered():
+    // arrived
+case current.IsFailed():
+    log.Println("failed:", current.FailureReason())
+case current.IsPending():
+    // queued or processing — poll again
+}
+```
+
+Because sends are asynchronous, the provider's own message id is **not** available at send time.
+Use the UUID from the send, and `StatusByProviderMessageID` only for ids you obtained later (from a
+callback or a provider report):
+
+```go
+current, err := client.StatusByProviderMessageID(ctx, "1234567890")
+```
+
+---
+
+## History
+
+```go
+page, err := client.History(ctx, notifier.HistoryQuery{
+    Limit:     50,
+    Status:    notifier.StatusFailed,
+    Channel:   notifier.ChannelSMS,
+    Recipient: "+98912",
+    From:      time.Now().Add(-24 * time.Hour),
+})
+
+for i := range page.Items {
+    fmt.Println(page.Items[i].ID, page.Items[i].Status)
+}
+
+if page.HasMore() {
+    next, err := client.History(ctx, notifier.HistoryQuery{Limit: 50, After: page.NextCursor})
+    _ = next
+}
+```
+
+`HistoryAll` follows the cursors for you:
+
+```go
+err := client.HistoryAll(ctx, notifier.HistoryQuery{
+    From: time.Now().Add(-time.Hour),
+}, func(n *notifier.Notification) error {
+    return index(n) // returning an error stops the walk
+})
+```
+
+---
+
+## Error handling
+
+Errors are typed. `errors.Is` classifies them and `errors.As` reaches the HTTP detail.
+
+| Sentinel | Meaning |
+|---|---|
+| `ErrInvalidArgument` | The SDK rejected the arguments locally. No request was sent. |
+| `ErrBadRequest` | 400/422 — the service rejected the request. |
+| `ErrUnauthorized` | 401 — missing, revoked or wrong API key. |
+| `ErrForbidden` | 403 — the key is valid but not allowed here. |
+| `ErrNotFound` | 404 — unknown notification or resource. |
+| `ErrConflict` | 409 — most often a reused `IdempotencyKey`. |
+| `ErrRateLimited` | 429 — see `APIError.RetryAfter`. |
+| `ErrUnavailable` | 503 — no channel available to route the message. |
+| `ErrServer` | Any other 5xx. |
+
+```go
+_, err := client.Status(ctx, id)
+
+var apiErr *notifier.APIError
+switch {
+case errors.Is(err, notifier.ErrNotFound):
+    // unknown id
+case errors.Is(err, notifier.ErrRateLimited):
+    time.Sleep(err.(*notifier.APIError).RetryAfter) // or errors.As
+case errors.As(err, &apiErr):
+    log.Printf("%s %s -> %d: %s (request id %s)",
+        apiErr.Method, apiErr.Path, apiErr.StatusCode, apiErr.Message, apiErr.RequestID)
+}
+```
+
+`APIError` also carries `Retryable()`, and the `X-Request-Id` from the response so a support request
+can be tied to the exact server-side log line.
+
+**The SDK never retries a send on its own.** Repeating a request risks delivering the message twice,
+which is worse than not delivering it at all. If you want retries, set `IdempotencyKey` — the
+service then answers `409 Conflict` instead of accepting a duplicate — and retry on
+`APIError.Retryable()` yourself.
+
+---
+
+## Receiving callbacks
+
+Notifier signs delivery callbacks with HMAC-SHA256 over the exact request body and sends the digest
+in `X-Notifier-Signature` as `sha256=<hex>`. `SignatureVerifier` authenticates them and restores the
+body for your handler:
+
+```go
+verifier, err := notifier.NewSignatureVerifier(os.Getenv("NOTIFIER_WEBHOOK_SECRET"))
+if err != nil {
+    return err
+}
+
+http.Handle("/notifier/callback", verifier.Handler(func(w http.ResponseWriter, r *http.Request) {
+    var note notifier.Notification
+    if err := json.NewDecoder(r.Body).Decode(&note); err != nil {
+        http.Error(w, "bad payload", http.StatusBadRequest)
+        return
+    }
+    fmt.Println(note.ID, note.Status)
+    w.WriteHeader(http.StatusNoContent)
+}))
+```
+
+Requests with a missing, malformed or wrong signature get a `401` and never reach your handler. The
+comparison is constant time. For a body you already have (a queue consumer, another framework), use
+the one-shot `notifier.VerifySignature(secret, body, header)`.
+
+---
+
+## Configuration
+
+```go
+client, err := notifier.NewClient(os.Getenv("NOTIFIER_API_KEY"),
+    notifier.WithBaseURL("https://notifier.staging.internal"), // default: https://notifier-api.vibe.ir
+    notifier.WithTimeout(10*time.Second),                      // default: 30s per round trip
+    notifier.WithHTTPClient(myInstrumentedClient),              // e.g. an OpenTelemetry RoundTripper
+    notifier.WithUserAgent("trade-hub/1.4"),                    // default: notifier-go-sdk/<version> <go version>
+)
+```
+
+A `Client` is safe for concurrent use and holds no resources that need closing: build **one per API
+key** at startup and share it. `NewClient` returns an error for a blank API key or an unusable base
+URL, so misconfiguration fails at boot rather than on the first message.
+
+---
+
+## Concurrency and performance
+
+The client is designed for the way services actually call it: many goroutines, one client.
+
+- Every call takes a `context.Context`; cancellation and deadlines propagate into the HTTP request.
+- Requests reuse a process-wide `http.Transport` derived from `http.DefaultTransport` with
+  `MaxIdleConnsPerHost` raised from the stdlib's 2 to 32 — the stdlib default serializes concurrent
+  calls to the same API host. Pass `WithHTTPClient` to opt out.
+- Response buffers come from a `sync.Pool`. Request bodies deliberately do not: bytes backing a
+  request body must stay valid past `Do` on an early response, so borrowing them from a pool would
+  be a data race waiting to happen.
+- Response bodies are always drained, so keep-alive connections go back to the pool.
+- Parameter validation and rendering (`SendParams.wire`) allocate nothing.
+
+Measured on an Apple M1 Pro, Go 1.26 (loopback HTTP server, `go test -bench .`):
+
+| Benchmark | Result |
+|---|---|
+| `BenchmarkSend` | 146 µs/op — full send: validate, encode, round trip, decode |
+| `BenchmarkSendParallel` | 35 µs/op — tuned transport |
+| `BenchmarkSendParallelStockTransport` | 51 µs/op — same code on the stock transport (~31% slower) |
+| `BenchmarkSendParamsWire` | 26 ns/op, **0 allocs** |
+| `BenchmarkPrepareBulk` (20 000 messages) | 72 µs/op, 3 allocs |
+
+Against the production API, `BenchmarkLive_Status` measures ~24 ms/op on a warm connection
+where the first, cold call costs DNS + TCP + TLS (~1 s from a developer network). Those numbers
+are network-bound and vary with the link; the local benchmarks above are the ones that describe
+the SDK itself.
+
+---
+
+## Development
+
+```bash
+make test        # go test ./...
+make race        # go test -race ./...
+make lint        # gofmt check, go vet, golangci-lint
+make bench       # benchmarks
+make coverage    # coverage report
+```
+
+The unit tests run against `httptest` servers and need no network. The live tests hit a real
+deployment and are **skipped** unless a key is configured:
+
+```bash
+# Read-only: history plus the 404 contract.
+NOTIFIER_API_KEY=... go test -run TestLive -v ./...
+
+# Dispatching is opt-in, because it sends real messages and costs money.
+NOTIFIER_LIVE_SEND=1 NOTIFIER_LIVE_RECIPIENT="+989120000000" \
+NOTIFIER_LIVE_TEMPLATE=verify NOTIFIER_LIVE_VALUES=123456 \
+NOTIFIER_API_KEY=... go test -run TestLive_Send -v ./...
+```
+
+---
+
+## Migrating from `kavenegar-java` / the Notifier Java SDK
+
+There is deliberately **no Kavenegar facade** in this SDK: new Go code should use the Notifier
+surface directly. The mapping is mechanical.
+
+| Java SDK | Go SDK |
+|---|---|
+| `new NotifierApi(key)` | `notifier.NewClient(key)` |
+| `api.sendTemplateByName(SMS, phone, "verify", "123456")` | `client.SendTemplateByName(ctx, notifier.TemplateParams{Channel: notifier.ChannelSMS, Recipient: phone, Template: "verify", Values: []string{"123456"}})` |
+| `api.sendTemplateByName(SMS, phone, "verify", varsMap)` | same, with `Vars: map[string]any{…}` |
+| `api.send(type, recipient, "body")` | `client.SendText(ctx, channel, recipient, "body")` |
+| `api.bulk(SMS, list)` | `client.Bulk(ctx, notifier.BulkParams{Channel: notifier.ChannelSMS, Messages: …})` |
+| `api.status(uuid)` | `client.Status(ctx, uuid)` |
+| `api.statusByProviderMessageId(id)` | `client.StatusByProviderMessageID(ctx, id)` |
+| `api.listNotifications(query)` | `client.History(ctx, notifier.HistoryQuery{…})` |
+| `catch (ApiException e)` | `errors.Is(err, notifier.ErrConflict)` / `errors.As(err, &apiErr)` |
+| `SendOptions.builder()…build()` | fields on `notifier.SendParams` |
+
+The `"group:template"` shorthand, positional `template_params`, and the "explicit group wins over the
+prefix" rule all behave exactly as they do in the Java SDK.
+
+---
+
+## License
+
+Proprietary; owned by **SoftinoProducts**. Terms defined by the owner.

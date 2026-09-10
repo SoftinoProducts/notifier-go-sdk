@@ -1,0 +1,52 @@
+# golangci-lint configuration. Keep the linter set tight: this SDK is small,
+# has zero third-party dependencies, and is meant to stay that way.
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+    - whitespace
+
+linters-settings:
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment # readability wins over a few bytes here
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - disableStutteringCheck
+      - name: package-comments
+      - name: indent-error-flow
+      - name: errorf
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: unexported-return
+
+issues:
+  exclude-rules:
+    # Tests may use extremely long table-driven literals and unchecked test helpers.
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+        - noctx
