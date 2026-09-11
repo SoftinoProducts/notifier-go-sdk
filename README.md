@@ -179,6 +179,51 @@ free up, so the service may receive them out of order.
 
 ---
 
+## Rehearsing a send (simulated)
+
+Pass `Simulated: true` to exercise the whole path — routing, group selection, template rendering,
+provider-template mapping, the status event and the panel — without delivering anything and
+without touching your templates, groups or channels. The service replaces the provider call with
+a simulator, so the notification is reported as delivered by provider `simulator` and its
+provider message id reads `sim-sms-kavenegar-1`: the would-be provider is still named, which makes
+a rehearsal useful for validating the configuration it bypassed.
+
+```go
+res, err := client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS,
+    Recipient: phone,
+    Template:  "sms-group:verify", // your real template and group, unchanged
+    Values:    []string{token},
+    Simulated: true,               // the only difference from a real send
+})
+fmt.Println(res.Simulated, res.Provider) // true simulator
+```
+
+`SendParams.Simulated` and `BulkParams.Simulated` behave the same way. In a bulk send a single
+message can opt out with `Simulated: notifier.Simulate(false)`.
+
+```go
+client.Bulk(ctx, notifier.BulkParams{
+    Channel:   notifier.ChannelSMS,
+    Simulated: true,
+    Messages: []notifier.BulkMessage{
+        {Recipient: a, TemplateName: "verify", Values: []string{"111111"}},   // rehearsed
+        {Recipient: b, TemplateName: "verify", Values: []string{"222222"},
+         Simulated: notifier.Simulate(false)},                                // really sent
+    },
+})
+```
+
+Two things worth knowing:
+
+- **The API must support the flag.** A service that predates it ignores the unknown field and
+  sends the message for real. `Notification.Simulated` echoes what the service actually did, so
+  check it (or the response of a first call) before trusting a rehearsal in a new environment.
+- **A rehearsal still creates a notification**, counted in analytics and visible in the panel,
+  with `provider = simulator`. It is not a dry run that leaves no trace.
+
+---
+
 ## Checking status
 
 Notifier is **asynchronous**: a successful send means the notification was *accepted and queued*.

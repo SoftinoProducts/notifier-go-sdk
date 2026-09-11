@@ -453,3 +453,38 @@ func TestBulkResult_ErrIsNilOnFullSuccess(t *testing.T) {
 		t.Errorf("Err() = %v, want nil", err)
 	}
 }
+
+// The batch flag applies to every message, and a single message may opt out of it.
+func TestBulk_SimulatedBatchFlagWithPerMessageOverride(t *testing.T) {
+	cap := &captured{}
+	client := newTestClient(t, respondWith(cap, http.StatusAccepted, `{"batch_id":"b","count":2}`))
+
+	_, err := client.Bulk(context.Background(), BulkParams{
+		Channel:   ChannelSMS,
+		Simulated: true,
+		Messages: []BulkMessage{
+			{Recipient: "+989120000001", Body: "rehearsal"},
+			{Recipient: "+989120000002", Body: "real", Simulated: Simulate(false)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bulk: %v", err)
+	}
+
+	body := cap.jsonBody(t)
+	if body["simulated"] != true {
+		t.Errorf("batch simulated = %v, want true", body["simulated"])
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("messages = %v", body["messages"])
+	}
+	first := msgs[0].(map[string]any)
+	second := msgs[1].(map[string]any)
+	if _, present := first["simulated"]; present {
+		t.Errorf("the first message should inherit the batch flag, got %v", first["simulated"])
+	}
+	if second["simulated"] != false {
+		t.Errorf("the second message should override to false, got %v", second["simulated"])
+	}
+}

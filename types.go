@@ -84,6 +84,10 @@ type Notification struct {
 	ProviderMessageID string     `json:"provider_message_id,omitempty"`
 	SentAt            *time.Time `json:"sent_at,omitempty"`
 	Error             string     `json:"error,omitempty"`
+
+	// Simulated reports that this delivery was rehearsed rather than attempted: the provider
+	// was never contacted and the message was not sent.
+	Simulated bool `json:"simulated,omitempty"`
 }
 
 // IsDelivered reports whether the notification reached the recipient.
@@ -151,6 +155,14 @@ type SendParams struct {
 	// Metadata is arbitrary JSON stored with the notification and echoed back when it is
 	// read. Use JSON to build it from a Go value.
 	Metadata json.RawMessage
+
+	// Simulated rehearses the send instead of delivering it: the service runs its whole
+	// pipeline — routing, group selection, template rendering, provider-template mapping — but
+	// never contacts the provider. The notification is reported as delivered by "simulator", so
+	// it shows up in the panel like any other send. Use it to exercise an integration without
+	// touching templates, groups or channel configuration; the API must support it (it is
+	// echoed back as Notification.Simulated).
+	Simulated bool
 }
 
 // TemplateParams describes a send that uses a template by name, which is the recommended
@@ -189,6 +201,9 @@ type TemplateParams struct {
 	IdempotencyKey string
 	// Metadata is arbitrary JSON stored alongside the notification.
 	Metadata json.RawMessage
+
+	// Simulated rehearses the send without dispatching it. See SendParams.Simulated.
+	Simulated bool
 }
 
 // BulkMessage is one recipient inside a bulk send.
@@ -215,6 +230,8 @@ type BulkMessage struct {
 	CallbackURL string
 	// Metadata is arbitrary JSON stored with the notification.
 	Metadata json.RawMessage
+	// Simulated overrides the batch-level flag for this message. Leave nil to inherit it.
+	Simulated *bool
 }
 
 // BulkParams is a bulk send: one channel type and many recipients.
@@ -224,7 +241,22 @@ type BulkParams struct {
 	// Messages are the recipients. At most MaxBulkMessages are sent per request; larger
 	// slices are chunked automatically.
 	Messages []BulkMessage
+	// Simulated rehearses every message in the batch without dispatching it, unless a message
+	// overrides it. See SendParams.Simulated.
+	Simulated bool
 }
+
+// Simulate returns a pointer to b, for overriding BulkParams.Simulated on a single message.
+//
+//	client.Bulk(ctx, notifier.BulkParams{
+//		Channel:   notifier.ChannelSMS,
+//		Simulated: true,
+//		Messages: []notifier.BulkMessage{
+//			{Recipient: phone, Body: "hi"},                       // simulated
+//			{Recipient: other, Body: "real", Simulated: notifier.Simulate(false)}, // really sent
+//		},
+//	})
+func Simulate(b bool) *bool { return &b }
 
 // BulkOptions tunes how BulkConcurrent splits and schedules the work.
 type BulkOptions struct {

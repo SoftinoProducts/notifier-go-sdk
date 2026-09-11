@@ -69,6 +69,7 @@ func (c *Client) SendTemplateByName(ctx context.Context, p TemplateParams) (*Not
 		CallbackURL:    p.CallbackURL,
 		IdempotencyKey: p.IdempotencyKey,
 		Metadata:       p.Metadata,
+		Simulated:      p.Simulated,
 	})
 }
 
@@ -165,6 +166,7 @@ type sendRequest struct {
 	CallbackURL    string          `json:"callback_url,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
 	Locale         string          `json:"locale,omitempty"`
+	Simulated      bool            `json:"simulated,omitempty"`
 }
 
 // wire validates the parameters and renders them as the request body.
@@ -212,5 +214,6 @@ func (p SendParams) wire() (sendRequest, error) {
 		CallbackURL:    p.CallbackURL,
 		Metadata:       p.Metadata,
 		Locale:         p.Locale,
+		Simulated:      p.Simulated,
 	}, nil
 }

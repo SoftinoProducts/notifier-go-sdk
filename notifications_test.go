@@ -526,3 +526,58 @@ func TestHistoryAll_RequiresCallback(t *testing.T) {
 		t.Fatalf("error = %v, want ErrInvalidArgument", err)
 	}
 }
+
+// A developer rehearses an integration by adding one field to a request they already send: the
+// template, group and channel configuration are untouched.
+func TestSend_SimulatedFlagIsSentOnTheWire(t *testing.T) {
+	cap := &captured{}
+	client := newTestClient(t, respondWith(cap, http.StatusAccepted, notificationJSON))
+
+	_, err := client.SendTemplateByName(context.Background(), TemplateParams{
+		Channel:   ChannelSMS,
+		Recipient: "+989120000000",
+		Template:  "sms-group:verify",
+		Values:    []string{"123456"},
+		Simulated: true,
+	})
+	if err != nil {
+		t.Fatalf("SendTemplateByName: %v", err)
+	}
+
+	body := cap.jsonBody(t)
+	if body["simulated"] != true {
+		t.Errorf("simulated = %v, want true", body["simulated"])
+	}
+	// The routing the caller rehearses is unchanged.
+	if body["group_name"] != "sms-group" || body["template_name"] != "verify" {
+		t.Errorf("routing = (%v, %v), want (sms-group, verify)", body["group_name"], body["template_name"])
+	}
+}
+
+func TestSend_SimulatedIsOmittedWhenFalse(t *testing.T) {
+	cap := &captured{}
+	client := newTestClient(t, respondWith(cap, http.StatusAccepted, notificationJSON))
+
+	if _, err := client.SendText(context.Background(), ChannelSMS, "+989120000000", "hi"); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	if _, present := cap.jsonBody(t)["simulated"]; present {
+		t.Error("simulated should be omitted when false")
+	}
+}
+
+func TestNotification_ReportsSimulated(t *testing.T) {
+	client := newTestClient(t, respondWith(nil, http.StatusOK,
+		`{"id":"1","status":"delivered","provider":"simulator","provider_message_id":"sim-sms-kavenegar-1","simulated":true}`))
+
+	n, err := client.Status(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !n.Simulated {
+		t.Error("the client did not read back the simulated flag")
+	}
+	if n.Provider != "simulator" {
+		t.Errorf("provider = %q, want simulator", n.Provider)
+	}
+}

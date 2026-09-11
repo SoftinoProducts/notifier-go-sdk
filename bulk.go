@@ -34,7 +34,7 @@ func (c *Client) Bulk(ctx context.Context, p BulkParams) (*BulkResult, error) {
 			})
 			continue
 		}
-		batch, err := c.sendBulkChunk(ctx, p.Channel, p.Messages[chunk.offset:chunk.end])
+		batch, err := c.sendBulkChunk(ctx, p.Channel, p.Messages[chunk.offset:chunk.end], p.Simulated)
 		if err != nil {
 			result.Failures = append(result.Failures, BulkFailure{
 				Offset: chunk.offset,
@@ -98,7 +98,7 @@ func (c *Client) BulkConcurrent(ctx context.Context, p BulkParams, opts BulkOpti
 					continue
 				}
 				chunk := chunks[i]
-				batch, err := c.sendBulkChunk(ctx, p.Channel, p.Messages[chunk.offset:chunk.end])
+				batch, err := c.sendBulkChunk(ctx, p.Channel, p.Messages[chunk.offset:chunk.end], p.Simulated)
 				if err != nil {
 					slots[i].err = err
 					continue
@@ -190,14 +190,14 @@ func validateBulk(p BulkParams) error {
 }
 
 // sendBulkChunk posts one chunk and returns the service's acknowledgement.
-func (c *Client) sendBulkChunk(ctx context.Context, channel ChannelType, messages []BulkMessage) (*BulkBatch, error) {
+func (c *Client) sendBulkChunk(ctx context.Context, channel ChannelType, messages []BulkMessage, simulated bool) (*BulkBatch, error) {
 	wire := make([]bulkMessage, len(messages))
 	for i := range messages {
 		wire[i] = messages[i].wire()
 	}
 
 	var out bulkResponse
-	req := bulkRequest{ChannelType: channel, Messages: wire}
+	req := bulkRequest{ChannelType: channel, Messages: wire, Simulated: simulated}
 	if err := c.doJSON(ctx, http.MethodPost, pathBulkNotifications, nil, req, &out); err != nil {
 		return nil, err
 	}
@@ -208,6 +208,7 @@ func (c *Client) sendBulkChunk(ctx context.Context, channel ChannelType, message
 type bulkRequest struct {
 	ChannelType ChannelType   `json:"channel_type"`
 	Messages    []bulkMessage `json:"messages"`
+	Simulated   bool          `json:"simulated,omitempty"`
 }
 
 // bulkMessage is the wire form of one entry in a bulk request.
@@ -223,6 +224,7 @@ type bulkMessage struct {
 	GroupName      string          `json:"group_name,omitempty"`
 	CallbackURL    string          `json:"callback_url,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	Simulated      *bool           `json:"simulated,omitempty"`
 }
 
 // wire renders one bulk message, applying the "group:template" shorthand.
@@ -249,6 +251,7 @@ func (m BulkMessage) wire() bulkMessage {
 		GroupName:      group,
 		CallbackURL:    m.CallbackURL,
 		Metadata:       m.Metadata,
+		Simulated:      m.Simulated,
 	}
 }
 
