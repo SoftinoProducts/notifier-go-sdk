@@ -160,8 +160,8 @@ type SendParams struct {
 	// pipeline — routing, group selection, template rendering, provider-template mapping — but
 	// never contacts the provider. The notification is reported as delivered by "simulator", so
 	// it shows up in the panel like any other send. Use it to exercise an integration without
-	// touching templates, groups or channel configuration; the API must support it (it is
-	// echoed back as Notification.Simulated).
+	// touching templates, groups or channel configuration. Notification.Simulated reports the
+	// delivery as the service recorded it.
 	Simulated bool
 }
 

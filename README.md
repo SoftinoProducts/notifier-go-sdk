@@ -214,13 +214,9 @@ client.Bulk(ctx, notifier.BulkParams{
 })
 ```
 
-Two things worth knowing:
-
-- **The API must support the flag.** A service that predates it ignores the unknown field and
-  sends the message for real. `Notification.Simulated` echoes what the service actually did, so
-  check it (or the response of a first call) before trusting a rehearsal in a new environment.
-- **A rehearsal still creates a notification**, counted in analytics and visible in the panel,
-  with `provider = simulator`. It is not a dry run that leaves no trace.
+Worth knowing: a rehearsal still creates a notification, counted in analytics and visible in the
+panel, with `provider = simulator`. It is not a dry run that leaves no trace. `Notification.Simulated`
+reports whether the delivery was rehearsed, as the service recorded it.
 
 ---
 
