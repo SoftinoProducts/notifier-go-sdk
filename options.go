@@ -10,11 +10,14 @@ const Version = "0.2.0"
 
 // config holds the resolved client configuration while options are applied.
 type config struct {
-	baseURL    string
-	timeout    time.Duration
-	timeoutSet bool
-	userAgent  string
-	httpClient *http.Client
+	baseURL string
+	// allowInsecureBaseURL permits plaintext http to a non-loopback host. See
+	// InsecureBaseURL.
+	allowInsecureBaseURL bool
+	timeout              time.Duration
+	timeoutSet           bool
+	userAgent            string
+	httpClient           *http.Client
 }
 
 // Option configures a Client. Options are applied in order and a nil Option is ignored,
@@ -24,9 +27,23 @@ type Option func(*config)
 // WithBaseURL points the client at a different API endpoint, for example a staging
 // deployment or an in-cluster service address. The default is DefaultBaseURL.
 //
-//	notifier.WithBaseURL("http://notifier-api.notifier.svc.cluster.local")
+//	notifier.WithBaseURL("https://notifier-api.notifier.svc.cluster.local")
+//
+// An https URL is required unless the host is loopback. The API key travels in the
+// X-API-Key header on every request, so a plaintext target would expose it to anything on
+// the path; refusing the URL here keeps the SDK from being the component that leaks a
+// credential. For a deliberately trusted non-loopback target (an in-cluster Service, a
+// sidecar), pair this with InsecureBaseURL and the choice becomes explicit.
 func WithBaseURL(baseURL string) Option {
 	return func(c *config) { c.baseURL = baseURL }
+}
+
+// InsecureBaseURL permits a plaintext http:// base URL on a non-loopback host.
+//
+// It exists so an operator who understands the network path can opt out deliberately. It is
+// never implied: without it, http:// is refused everywhere except loopback.
+func InsecureBaseURL() Option {
+	return func(c *config) { c.allowInsecureBaseURL = true }
 }
 
 // WithTimeout bounds a single HTTP round trip, including reading the response body.

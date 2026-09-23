@@ -395,3 +395,49 @@ func TestJSON_HelperRejectsUnsupportedValues(t *testing.T) {
 		t.Errorf("JSON(nil) = (%v, %v), want (nil, nil)", raw, err)
 	}
 }
+
+// TestNormalizeBaseURL_RefusesPlaintextForKey pins the credential-leak guard: the API key
+// travels in the X-API-Key header on every request, so a plaintext target would expose it to
+// anything on the path. The SDK must refuse rather than be the component that leaks it.
+func TestNormalizeBaseURL_RefusesPlaintextForKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"https is fine", "https://api.example.com", false},
+		{"plaintext remote is refused", "http://api.example.com", true},
+		{"plaintext in-cluster is refused", "http://notifier-api.notifier.svc.cluster.local", true},
+		{"loopback http is allowed for local targets", "http://127.0.0.1:8080", false},
+		{"localhost http is allowed", "http://localhost:8080", false},
+		{"ipv6 loopback http is allowed", "http://[::1]:8080", false},
+		{"unsupported scheme", "ftp://api.example.com", true},
+		{"empty", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClient("test-key", WithBaseURL(tc.raw))
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected %q to be refused", tc.raw)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected %q to be accepted, got %v", tc.raw, err)
+			}
+		})
+	}
+}
+
+// TestInsecureBaseURL_OptOut confirms the escape hatch works and is explicit, so an operator
+// with a trusted plaintext path is not blocked — the point is that the risk is chosen.
+func TestInsecureBaseURL_OptOut(t *testing.T) {
+	c, err := NewClient("test-key",
+		WithBaseURL("http://notifier-api.notifier.svc.cluster.local"),
+		InsecureBaseURL())
+	if err != nil {
+		t.Fatalf("InsecureBaseURL must permit a trusted plaintext target, got %v", err)
+	}
+	if c.BaseURL() != "http://notifier-api.notifier.svc.cluster.local" {
+		t.Fatalf("unexpected base URL: %s", c.BaseURL())
+	}
+}

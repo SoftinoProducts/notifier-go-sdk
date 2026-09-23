@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -64,7 +65,7 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, errors.New("notifier: API key is required")
 	}
-	base, err := normalizeBaseURL(cfg.baseURL)
+	base, err := normalizeBaseURL(cfg.baseURL, cfg.allowInsecureBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +195,13 @@ func defaultUserAgent() string {
 }
 
 // normalizeBaseURL validates and canonicalizes a base URL, dropping any trailing slash.
-func normalizeBaseURL(raw string) (string, error) {
+//
+// A plaintext http:// URL is REFUSED when a credential is configured, because the API key
+// travels in the X-API-Key header on every request: over http it is readable by anything on
+// the path, and the SDK would be the component that leaked it. Use InsecureBaseURL to opt
+// out for a loopback or test target, which makes the decision explicit at the call site
+// rather than a silent property of a URL string.
+func normalizeBaseURL(raw string, allowInsecure bool) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", errors.New("notifier: base URL is empty")
@@ -204,7 +211,12 @@ func normalizeBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("notifier: invalid base URL %q: %w", raw, err)
 	}
 	switch u.Scheme {
-	case "http", "https":
+	case "https":
+	case "http":
+		if !allowInsecure && !isLoopbackHost(u.Hostname()) {
+			return "", fmt.Errorf("notifier: base URL %q is not https; the API key would be sent in "+
+				"cleartext. Use https, or pass notifier.InsecureBaseURL() for a trusted local target", raw)
+		}
 	default:
 		return "", fmt.Errorf("notifier: base URL %q must use the http or https scheme", raw)
 	}
@@ -212,4 +224,14 @@ func normalizeBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("notifier: base URL %q has no host", raw)
 	}
 	return strings.TrimRight(u.String(), "/"), nil
+}
+
+// isLoopbackHost reports whether host is a loopback literal or localhost. A local target
+// cannot be eavesdropped from the network, so refusing it would only make tests awkward.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
