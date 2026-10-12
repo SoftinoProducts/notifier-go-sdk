@@ -251,6 +251,74 @@ current, err := client.StatusByProviderMessageID(ctx, "1234567890")
 
 ---
 
+## Web Push (browser notifications)
+
+A real Web Push notification reaches the browser through its push service — even while the page is
+closed — which needs the browser's subscription (`endpoint`, `p256dh`, `auth`) and a **VAPID** key
+pair. Both are handled for you: the subscription is registered once and referenced afterwards by a
+**device id**, and the key pair lives on the `webpush` channel with `provider: "vapid"`.
+
+**`recipient` for that channel is a device id, not the subscription.** Register the subscription,
+then send to the id:
+
+```go
+// 1. Register the subscription your frontend collected. This is idempotent per endpoint, so a
+//    frontend may call it on every visit.
+device, err := client.RegisterPushDevice(ctx, notifier.RegisterPushDeviceParams{
+    Subscription: notifier.PushSubscription{
+        Endpoint: sub.Endpoint,
+        Keys:     notifier.PushSubscriptionKeys{P256DH: sub.Keys.P256dh, Auth: sub.Keys.Auth},
+    },
+    // Your own user id; lets you list that user's devices later. Omitted on a re-registration
+    // it keeps the stored binding, so registering on every visit never unlinks a device.
+    UserRef: "user-42",
+})
+if err != nil {
+    return err // ErrNotFound: no active vapid channel. ErrConflict: device limit reached.
+}
+
+// 2. Send. The typed helper fixes the channel and the recipient, so a subscription JSON can
+//    never be passed where a device id belongs.
+_, err = client.SendToDevice(ctx, device.ID, "Build finished", "deploy #42 is live")
+
+// A templated message works the same way.
+_, err = client.SendTemplateToDevice(ctx, device.ID, notifier.TemplateParams{
+    Template: "order-ready",
+    Values:   []string{"1234"},
+})
+```
+
+Every browser of one user, and the logout path:
+
+```go
+page, err := client.PushDevices(ctx, notifier.PushDeviceQuery{UserRef: "user-42", Limit: 100})
+for _, d := range page.Items {
+    if d.IsUsable() { // false once the push service reported the subscription gone
+        _, _ = client.SendToDevice(ctx, d.ID, "Build finished", "deploy #42 is live")
+    }
+}
+
+// On logout — otherwise the next user of this browser keeps getting the previous one's pushes.
+err = client.DeletePushDevice(ctx, device.ID)
+```
+
+Your frontend must subscribe with the **service's** public key, not one you generate locally:
+
+```go
+key, err := client.GetVAPIDPublicKey(ctx, "") // {"channel_id","public_key","subject"}
+// Expose key.PublicKey to the browser (through your own backend) and pass it as
+// applicationServerKey to pushManager.subscribe().
+```
+
+If you need the generic `Send` (extra options, a channel group), get the recipient through
+`notifier.DeviceRecipient(device.ID)`: it validates the value and refuses a subscription JSON with a
+message that says what to do instead. And if your frontend posts you the raw JSON,
+`notifier.ParsePushSubscription(raw)` decodes it.
+
+Full contract, rationale and migration steps: `notifier-api/acknowledgement/webpush.md`.
+
+---
+
 ## History
 
 ```go

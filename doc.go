@@ -22,6 +22,20 @@
 //	}
 //	fmt.Println(res.ID, res.Status)
 //
+// # Web Push
+//
+// The webpush channel with the vapid provider delivers browser notifications, and its recipient
+// is a registered device id rather than a subscription:
+//
+//	device, err := client.RegisterPushDevice(ctx, notifier.RegisterPushDeviceParams{
+//		Subscription: sub, UserRef: "user-42",
+//	})
+//	_, err = client.SendToDevice(ctx, device.ID, "Build finished", "deploy #42 is live")
+//
+// GetVAPIDPublicKey supplies the applicationServerKey the browser subscribes with, and
+// DeletePushDevice is the logout path. See the README and
+// notifier-api/acknowledgement/webpush.md for the full contract.
+//
 // # Design
 //
 //   - Zero third-party dependencies. Only the standard library is used, which keeps
