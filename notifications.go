@@ -185,6 +185,9 @@ func (p SendParams) wire() (sendRequest, error) {
 			templateName = ""
 		}
 	}
+	if route != "" && templateName != "" {
+		return sendRequest{}, invalidArgument("a route send cannot also set template_name")
+	}
 	if route == "" && p.Channel == "" {
 		return sendRequest{}, invalidArgument("channel or route is required")
 	}
