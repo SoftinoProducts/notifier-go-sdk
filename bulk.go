@@ -185,6 +185,9 @@ func validateBulk(p BulkParams) error {
 		if m.Body == "" && m.TemplateID == "" && m.TemplateName == "" {
 			return invalidArgument("messages[%d]: one of body, template_id or template_name is required", i)
 		}
+		if strings.HasPrefix(m.TemplateName, "route:") {
+			return invalidArgument("messages[%d]: bulk sends do not support the route: shorthand; use SendTemplateByName", i)
+		}
 	}
 	return nil
 }

@@ -88,6 +88,10 @@ type Notification struct {
 	// Simulated reports that this delivery was rehearsed rather than attempted: the provider
 	// was never contacted and the message was not sent.
 	Simulated bool `json:"simulated,omitempty"`
+
+	// FanoutID and FanoutStatus are present on the primary leg of a route send.
+	FanoutID     string `json:"fanout_id,omitempty"`
+	FanoutStatus string `json:"fanout_status,omitempty"`
 }
 
 // IsDelivered reports whether the notification reached the recipient.
@@ -123,7 +127,8 @@ type SendParams struct {
 
 	// TemplateName selects a template by name, resolved server-side against the tenant's
 	// templates for the channel and locale. It may be written "group:template" to also
-	// route through a channel group by name.
+	// route through a channel group by name, or "route:name" to send through a saved
+	// fan-out route. A route defines its own channels, so Channel is ignored for it.
 	TemplateName string
 	// TemplateID selects a template by UUID, for callers that already store it.
 	TemplateID string
@@ -141,6 +146,10 @@ type SendParams struct {
 	// Group routes the send through a channel group by name. It takes precedence over a
 	// "group:template" prefix in TemplateName.
 	Group string
+	// Route sends through a saved fan-out route by name. It takes precedence over a
+	// "route:name" prefix in TemplateName. The route defines every channel, so the
+	// Channel field is ignored when Route is set.
+	RouteName string
 
 	// Locale selects which localized variant of a template to render. Empty means the
 	// service default.
@@ -181,7 +190,7 @@ type TemplateParams struct {
 	// Recipient is the destination address.
 	Recipient string
 	// Template is the template name, optionally prefixed with a channel group name as
-	// "group:template".
+	// "group:template" or addressed as a saved route with "route:name".
 	Template string
 	// Values are bound positionally to the template's declared param_names.
 	Values []string

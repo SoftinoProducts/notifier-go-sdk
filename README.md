@@ -99,6 +99,24 @@ client.SendTemplateByName(ctx, notifier.TemplateParams{
 })
 ```
 
+### Sending through a saved route: `"route:name"`
+
+A route is a named fan-out (for example `otp` = SMS + Bale, plus Telegram when the user has a
+binding). The route defines its channels, templates and recipient sources, so `Channel` is
+ignored:
+
+```go
+client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelSMS, // ignored; the route defines the channels
+    Recipient: phone,
+    Template:  "route:otp",
+    Values:    []string{"123456"},
+})
+```
+
+`Notification.FanoutID` and `Notification.FanoutStatus` carry the aggregate; each leg is an
+independent notification. Bulk sends reject `route:` because a batch has one channel type.
+
 ### Scheduling, callbacks and idempotency
 
 `TemplateParams` and `SendParams` both accept the full set of send options:

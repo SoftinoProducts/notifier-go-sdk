@@ -581,3 +581,33 @@ func TestNotification_ReportsSimulated(t *testing.T) {
 		t.Errorf("provider = %q, want simulator", n.Provider)
 	}
 }
+
+func TestSendTemplateByName_RouteShorthand(t *testing.T) {
+	cap := &captured{}
+	client := newTestClient(t, respondWith(cap, http.StatusAccepted, notificationJSON))
+
+	_, err := client.SendTemplateByName(context.Background(), TemplateParams{
+		Channel:   ChannelSMS,
+		Recipient: "+989120000000",
+		Template:  "route:otp",
+		Values:    []string{"123456"},
+	})
+	if err != nil {
+		t.Fatalf("SendTemplateByName: %v", err)
+	}
+
+	body := cap.jsonBody(t)
+	if body["route_name"] != "otp" {
+		t.Errorf("route_name = %v, want otp", body["route_name"])
+	}
+	if _, present := body["channel_type"]; present {
+		t.Errorf("channel_type must be omitted for a route send, got %v", body["channel_type"])
+	}
+	if _, present := body["template_name"]; present {
+		t.Errorf("template_name must be omitted for a route send, got %v", body["template_name"])
+	}
+	params, ok := body["template_params"].([]any)
+	if !ok || len(params) != 1 || params[0] != "123456" {
+		t.Errorf("template_params = %v", body["template_params"])
+	}
+}

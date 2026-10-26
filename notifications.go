@@ -150,7 +150,8 @@ func (c *Client) HistoryAll(ctx context.Context, q HistoryQuery, fn func(*Notifi
 
 // sendRequest is the wire form of POST /v1/notifications.
 type sendRequest struct {
-	ChannelType    ChannelType     `json:"channel_type"`
+	ChannelType    ChannelType     `json:"channel_type,omitempty"`
+	RouteName      string          `json:"route_name,omitempty"`
 	Recipient      string          `json:"recipient"`
 	Subject        string          `json:"subject,omitempty"`
 	Body           string          `json:"body,omitempty"`
@@ -174,20 +175,30 @@ type sendRequest struct {
 // The checks mirror the service's own rules, so a programming mistake fails immediately
 // with ErrInvalidArgument instead of costing a round trip.
 func (p SendParams) wire() (sendRequest, error) {
-	if p.Channel == "" {
-		return sendRequest{}, invalidArgument("channel is required")
+	route := p.RouteName
+	templateName := p.TemplateName
+	if templateName != "" {
+		if strings.HasPrefix(templateName, "route:") && len(templateName) > len("route:") {
+			if route == "" {
+				route = templateName[len("route:"):]
+			}
+			templateName = ""
+		}
+	}
+	if route == "" && p.Channel == "" {
+		return sendRequest{}, invalidArgument("channel or route is required")
 	}
 	if strings.TrimSpace(p.Recipient) == "" {
 		return sendRequest{}, invalidArgument("recipient is required")
 	}
-	if p.Body == "" && p.TemplateID == "" && p.TemplateName == "" {
+	if route == "" && p.Body == "" && p.TemplateID == "" && p.TemplateName == "" {
 		return sendRequest{}, invalidArgument("one of body, template_id or template_name is required")
 	}
 
 	// "group:template" routes through a channel group by name. An explicit Group wins
-	// over the prefix so a group name can be supplied dynamically.
+	// over the prefix so a group name can be supplied dynamically. A "route:name"
+	// reference is handled above and leaves templateName empty.
 	group := p.Group
-	templateName := p.TemplateName
 	if templateName != "" {
 		if prefix, name := splitGroupTemplate(templateName); prefix != "" {
 			if group == "" {
@@ -197,8 +208,15 @@ func (p SendParams) wire() (sendRequest, error) {
 		}
 	}
 
+	channelType := p.Channel
+	if route != "" {
+		// The route defines every channel; a leftover channel_type would be a
+		// contradictory request.
+		channelType = ""
+	}
 	return sendRequest{
-		ChannelType:    p.Channel,
+		ChannelType:    channelType,
+		RouteName:      route,
 		Recipient:      p.Recipient,
 		Subject:        p.Subject,
 		Body:           p.Body,
