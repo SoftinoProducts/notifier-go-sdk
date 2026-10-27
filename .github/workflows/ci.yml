@@ -62,21 +62,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Deliberately NOT `stable`. golangci-lint v1 (here v1.64.8, built with Go 1.24)
-      # refuses to analyze a project whose toolchain is newer than the one it was built
-      # with, so running it under a current Go release fails outright. The linter therefore
-      # gets the toolchain it was built for — still well above the go.mod floor of 1.22 —
-      # while the `test` job above runs the suite on the current release.
+      # The project now declares go 1.26.8 (the stdlib security floor). golangci-lint
+      # refuses to analyze a module newer than the Go toolchain it was built with, and
+      # the prebuilt v1.64.8 binary was built with Go 1.24, so it fails on this go.mod.
+      # Build the linter from source with the current toolchain instead.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: stable
 
       # Pinned: the config in .golangci.yml uses the v1 schema.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
           args: --timeout=3m
 
   benchmarks:
