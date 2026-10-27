@@ -77,9 +77,20 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
-      # Pinned: the config in .golangci.yml uses the v1 schema.
+      # Pinned: the config in .golangci.yml uses the v1 schema. The summary makes
+      # findings visible from the public run page even though the raw step log is not.
       - name: Run golangci-lint
-        run: $(go env GOPATH)/bin/golangci-lint run --timeout=3m
+        run: |
+          set +e
+          $(go env GOPATH)/bin/golangci-lint run --timeout=3m 2>&1 | tee lint.out
+          rc=${PIPESTATUS[0]}
+          {
+            echo '### golangci-lint output'
+            echo '```'
+            cat lint.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
   benchmarks:
     name: Benchmarks
