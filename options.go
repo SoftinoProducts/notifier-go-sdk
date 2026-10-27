@@ -6,7 +6,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent header.
-const Version = "0.4.0"
+const Version = "0.4.1"
 
 // config holds the resolved client configuration while options are applied.
 type config struct {

@@ -27,10 +27,11 @@ type ChannelType string
 // The channel types implemented by the service. A tenant can also define its own, so any
 // non-empty value is accepted; these constants cover the built-in ones.
 const (
-	ChannelSMS     ChannelType = "sms"
-	ChannelEmail   ChannelType = "email"
-	ChannelWebPush ChannelType = "webpush"
-	ChannelBale    ChannelType = "bale"
+	ChannelSMS      ChannelType = "sms"
+	ChannelEmail    ChannelType = "email"
+	ChannelWebPush  ChannelType = "webpush"
+	ChannelTelegram ChannelType = "telegram"
+	ChannelBale     ChannelType = "bale"
 )
 
 // Status is the coarse lifecycle state of a notification.
@@ -158,8 +159,8 @@ type SendParams struct {
 	SendAt *time.Time
 	// CallbackURL receives the HMAC-signed delivery callback for this notification.
 	CallbackURL string
-	// IdempotencyKey makes the send safe to repeat: the service returns 409 Conflict for
-	// a key it has already accepted, so a retry cannot deliver twice.
+	// IdempotencyKey makes the send safe to repeat. A route replay returns the existing
+	// fanout instead of creating a second one, so a retry cannot deliver twice.
 	IdempotencyKey string
 	// Metadata is arbitrary JSON stored with the notification and echoed back when it is
 	// read. Use JSON to build it from a Go value.

@@ -1,9 +1,9 @@
 # Notifier Go SDK
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/SoftinoProducts/notifier-go-sdk.svg)](https://pkg.go.dev/github.com/SoftinoProducts/notifier-go-sdk)
-[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev/dl/)
+[![Go 1.26.8+](https://img.shields.io/badge/Go-1.26.8%2B-00ADD8)](https://go.dev/dl/)
 
-A Go client for the **Notifier** multi-channel notification hub — SMS, email, web-push and Bale
+A Go client for the **Notifier** multi-channel notification hub — SMS, email, web-push, Bale and Telegram
 behind one API, with the concrete provider (Kavenegar, SMS.ir, SMTP, Centrifugo, …) resolved by the
 service from your tenant's channel configuration.
 
@@ -39,7 +39,7 @@ fmt.Println(res.ID, res.Status) // 9f1a2b3c-… queued
 go get github.com/SoftinoProducts/notifier-go-sdk
 ```
 
-Requires **Go 1.22 or newer** and a Notifier API key. The default endpoint is
+Requires **Go 1.26.8 or newer** and a Notifier API key. The default endpoint is
 `https://notifier-api.vibe.ir`; point elsewhere with `WithBaseURL`.
 
 ---
@@ -99,14 +99,57 @@ client.SendTemplateByName(ctx, notifier.TemplateParams{
 })
 ```
 
-### Sending through a saved route: `"route:name"`
+### Telegram and Bale
 
-A route is a named fan-out (for example `otp` = SMS + Bale, plus Telegram when the user has a
-binding). The route defines its channels, templates and recipient sources, so `Channel` is
-ignored:
+Both are ordinary channels. Create a template with `channel_type: "telegram"` or
+`"bale"` and declare its `param_names`, exactly as for SMS. For a **direct** send the
+recipient is the messenger chat id:
 
 ```go
-client.SendTemplateByName(ctx, notifier.TemplateParams{
+// Direct Telegram: recipient is the numeric chat id.
+res, err := client.SendText(ctx, notifier.ChannelTelegram, "67313260", "Your code: 123456")
+
+res, err = client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelTelegram,
+    Recipient: "67313260",
+    Template:  "telegram-otp",              // channel_type must be telegram
+    Values:    []string{"123456"},
+})
+
+// Direct Bale: recipient is the Bale chat id.
+res, err = client.SendText(ctx, notifier.ChannelBale, "123456789", "Your code: 123456")
+
+res, err = client.SendTemplateByName(ctx, notifier.TemplateParams{
+    Channel:   notifier.ChannelBale,
+    Recipient: "123456789",
+    Template:  "bale-otp",                  // channel_type must be bale
+    Values:    []string{"123456"},
+})
+```
+
+A direct Telegram send needs a chat id and does **not** use a binding. A route that sends
+to a phone number can resolve the phone to a Telegram chat through a binding; that is the
+`recipient_source: "binding"` mode described below. Bale has no binding step: use the Bale
+chat id.
+
+### Sending through a saved route: `"route:name"` (fan-out)
+
+A saved route is a named fan-out defined in Notifier (UI or
+`POST /v1/notification-routes`). It is not a channel group:
+
+| | Channel group | Saved route |
+|---|---|---|
+| Purpose | failover inside one channel type | deliver over every selected target |
+| Targets | channels of one type | up to five targets, possibly different types |
+| Result | one notification | one child notification per target, grouped by `fanout_id` |
+| SDK syntax | `"group:template"` | `"route:<name>"` |
+| Bulk | allowed | rejected (`route:` is per-recipient) |
+
+The route owns its channels, templates, recipient sources and required flags, so `Channel`
+is ignored:
+
+```go
+res, err := client.SendTemplateByName(ctx, notifier.TemplateParams{
     Channel:   notifier.ChannelSMS, // ignored; the route defines the channels
     Recipient: phone,
     Template:  "route:otp",
@@ -114,8 +157,90 @@ client.SendTemplateByName(ctx, notifier.TemplateParams{
 })
 ```
 
+An explicit `RouteName` is available on `SendParams` for dynamic code; it takes
+precedence over the `route:` prefix. Do not also set `TemplateName`:
+
+```go
+res, err := client.Send(ctx, notifier.SendParams{
+    RouteName:      "otp",
+    Recipient:      phone,
+    Values:         []string{"123456"},
+    IdempotencyKey: "otp-" + requestID,
+})
+```
+
+A replay with the same idempotency key returns the original fanout instead of sending the
+targets again.
+
+A route definition created once in the UI or with the API looks like this:
+
+```json
+{
+  "name": "otp",
+  "targets": [
+    {"channel_type": "sms", "channel_id": "SMS_CHANNEL_ID", "template_id": "SMS_TEMPLATE_ID", "recipient_source": "request", "required": true},
+    {"channel_type": "bale", "channel_id": "BALE_CHANNEL_ID", "template_id": "BALE_TEMPLATE_ID", "recipient_source": "request", "required": true},
+    {"channel_type": "telegram", "channel_id": "TELEGRAM_CHANNEL_ID", "template_id": "TELEGRAM_TEMPLATE_ID", "recipient_source": "binding", "required": false}
+  ]
+}
+```
+
+- `recipient_source: "request"` sends to the route's `Recipient` (the phone number).
+- `recipient_source: "binding"` is for Telegram: the service resolves the phone to a
+  chat id through `channel_bindings`.
+- `required: true` makes a missing Telegram binding fail the send with
+  `400 no telegram binding for <phone>`. With `required: false`, that leg is reported as
+  `skipped` instead.
+- The route and every target template must be active, and all templates must declare the
+  same number of parameters (the API validates this; a route has at most five targets).
+
+### Binding a Telegram chat
+
+Binding is an account-management operation, not a send; the SDK does not wrap it. Create a
+one-time deep link with the REST API:
+
+```bash
+curl -X POST "https://notifier-api.vibe.ir/v1/channels/$TELEGRAM_CHANNEL_ID/bindings" \
+  -H "X-API-Key: $NOTIFIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"external_ref":"+989120000000"}'
+```
+
+The response contains `token`, `deep_link` and `expires_at`. Send the user to `deep_link`;
+after they press **Start**, the phone is bound to that Telegram chat and a route send to
+the phone resolves the Telegram leg automatically. List bindings with
+`GET /v1/channels/{channel_id}/bindings`; remove one by its binding id with
+`DELETE /v1/channels/{channel_id}/bindings/{binding_id}`. The token is single-use and
+expires after 15 minutes.
+
+### What the route call returns
+
+The call returns after the child legs are created; it does not wait for delivery.
 `Notification.FanoutID` and `Notification.FanoutStatus` carry the aggregate; each leg is an
-independent notification. Bulk sends reject `route:` because a batch has one channel type.
+independent notification:
+
+```go
+fmt.Println(res.ID)           // primary notification UUID
+fmt.Println(res.Status)       // usually queued
+fmt.Println(res.FanoutID)     // fanout UUID, empty on a single-channel send
+fmt.Println(res.FanoutStatus) // queued | processing | delivered | failed | partial | skipped
+```
+
+Poll the primary leg with `client.Status(ctx, res.ID)`. To inspect every child, call the
+fanout endpoint (the SDK does not wrap it):
+
+```bash
+curl -H "X-API-Key: $NOTIFIER_API_KEY" \
+  "https://notifier-api.vibe.ir/v1/notification-fanouts/$FANOUT_ID"
+```
+
+`targets[]` reports each leg's `channel_type`, `recipient`, `status`, `notification_id` and
+failure reason. The aggregate is `delivered` only when the required legs are delivered; an
+optional missing binding is `skipped`, and a mix of delivered and failed legs is `partial`.
+The route's children are independent notifications, so retrying one leg does not resend
+the others.
+
+Bulk sends reject `route:` because a batch is scoped to one channel type.
 
 ### Scheduling, callbacks and idempotency
 
