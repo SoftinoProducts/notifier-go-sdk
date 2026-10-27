@@ -172,6 +172,35 @@ res, err := client.Send(ctx, notifier.SendParams{
 A replay with the same idempotency key returns the original fanout instead of sending the
 targets again.
 
+#### Let the request choose the template
+
+A route target can set `template_source: "request"` and omit its own template. The send then
+supplies `template_name` (or `template_id`), which is resolved for that target's channel type.
+This lets one generic Telegram route serve many notification categories:
+
+```json
+{
+  "name": "telegram-generic",
+  "targets": [
+    {"channel_type": "telegram", "channel_id": "TELEGRAM_CHANNEL_ID", "template_source": "request", "recipient_source": "binding", "required": false}
+  ]
+}
+```
+
+```go
+res, err := client.Send(ctx, notifier.SendParams{
+    RouteName:    "telegram-generic",
+    Recipient:    phone,
+    TemplateName: "otp-login",       // resolved for the target's channel type
+    Values:       []string{"123456"},
+})
+```
+
+`SendTemplateByName` cannot carry a request template together with a `route:` reference — the
+reference itself is a template string — so use `Send` with `RouteName` and `TemplateName`.
+A send through a route without any `template_source: "request"` target rejects a request
+template with `400`; a request-template target without a template is also `400`.
+
 A route definition created once in the UI or with the API looks like this:
 
 ```json
@@ -208,10 +237,35 @@ curl -X POST "https://notifier-api.vibe.ir/v1/channels/$TELEGRAM_CHANNEL_ID/bind
 
 The response contains `token`, `deep_link` and `expires_at`. Send the user to `deep_link`;
 after they press **Start**, the phone is bound to that Telegram chat and a route send to
-the phone resolves the Telegram leg automatically. List bindings with
-`GET /v1/channels/{channel_id}/bindings`; remove one by its binding id with
-`DELETE /v1/channels/{channel_id}/bindings/{binding_id}`. The token is single-use and
-expires after 15 minutes.
+the phone resolves the Telegram leg automatically. The token is single-use and expires
+after 15 minutes.
+
+`GET /v1/channels/{channel_id}/bindings` returns a **bare JSON array** (no `items` envelope
+and no pagination), newest first:
+
+```json
+[
+  {
+    "id": "8f0c0f6e-...",
+    "channel_id": "53ea93ef-...",
+    "external_ref": "+989120000000",
+    "chat_id": "67313260",
+    "created_at": "2026-10-27T11:00:00Z",
+    "updated_at": "2026-10-27T11:00:00Z"
+  }
+]
+```
+
+Remove one by its binding `id`:
+
+```bash
+curl -X DELETE "https://notifier-api.vibe.ir/v1/channels/$TELEGRAM_CHANNEL_ID/bindings/$BINDING_ID" \
+  -H "X-API-Key: $NOTIFIER_API_KEY"    # 204 No Content
+```
+
+An unknown binding id returns `404`; an invalid UUID returns `400`. Bindings are scoped to
+the channel and tenant. One chat maps to one phone: a later `/start` for the same chat
+rebinds it to the new phone and removes the old phone's binding.
 
 ### What the route call returns
 
@@ -549,12 +603,14 @@ if err != nil {
 }
 
 http.Handle("/notifier/callback", verifier.Handler(func(w http.ResponseWriter, r *http.Request) {
-    var note notifier.Notification
-    if err := json.NewDecoder(r.Body).Decode(&note); err != nil {
+    var event notifier.CallbackEvent
+    if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
         http.Error(w, "bad payload", http.StatusBadRequest)
         return
     }
-    fmt.Println(note.ID, note.Status)
+    // event.NotificationID is the leg that changed; for a route child it is the
+    // child's notification id, and event.FanoutID groups the legs of one send.
+    fmt.Println(event.NotificationID, event.FanoutID, event.Channel, event.Status)
     w.WriteHeader(http.StatusNoContent)
 }))
 ```
@@ -562,6 +618,14 @@ http.Handle("/notifier/callback", verifier.Handler(func(w http.ResponseWriter, r
 Requests with a missing, malformed or wrong signature get a `401` and never reach your handler. The
 comparison is constant time. For a body you already have (a queue consumer, another framework), use
 the one-shot `notifier.VerifySignature(secret, body, header)`.
+
+Each **non-skipped child** of a route send produces its own callback: `notification_id` is the
+child's id, `channel_type` is that leg's channel, and `fanout_id` is the route send. A
+single-channel notification omits `fanout_id`. The callback is a terminal outcome
+(`delivered` or `failed`), not an acknowledgement of the initial `queued` response. A
+skipped optional target is never dispatched, so it produces no callback; correlating a
+late binding is not possible from the original occurrence. The hub retries a callback on
+any non-2xx response: three attempts, 500 ms then 1 s apart, within a 10 s timeout.
 
 ---
 

@@ -95,6 +95,26 @@ type Notification struct {
 	FanoutStatus string `json:"fanout_status,omitempty"`
 }
 
+// CallbackEvent is the body of a delivery callback.
+//
+// It is a StatusEvent, not a Notification: the identifier field is
+// notification_id (not id), and a route child carries fanout_id and channel_type
+// so the receiver can correlate it with the route send. A single-channel send
+// omits fanout_id. A skipped optional target is never dispatched, so it produces
+// no callback at all.
+type CallbackEvent struct {
+	NotificationID    string      `json:"notification_id"`
+	TenantID          string      `json:"tenant_id"`
+	Status            Status      `json:"status"`
+	Channel           ChannelType `json:"channel_type,omitempty"`
+	FanoutID          string      `json:"fanout_id,omitempty"`
+	Provider          string      `json:"provider,omitempty"`
+	ProviderMessageID string      `json:"provider_message_id,omitempty"`
+	Simulated         bool        `json:"simulated,omitempty"`
+	Error             string      `json:"error,omitempty"`
+	Timestamp         time.Time   `json:"timestamp"`
+}
+
 // IsDelivered reports whether the notification reached the recipient.
 func (n *Notification) IsDelivered() bool { return n.Status == StatusDelivered }
 

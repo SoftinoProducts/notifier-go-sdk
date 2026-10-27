@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -117,5 +118,16 @@ func TestHistoryQuery_ValuesFormatsTimesAsRFC3339(t *testing.T) {
 	}
 	if got := values.Get("to"); got != "2026-09-11T04:30:00Z" {
 		t.Errorf("to = %q, want the instant in UTC", got)
+	}
+}
+
+func TestCallbackEventCarriesChildAndFanout(t *testing.T) {
+	var event CallbackEvent
+	raw := []byte(`{"notification_id":"child-1","tenant_id":"t-1","status":"delivered","channel_type":"telegram","fanout_id":"fan-1","provider":"telegram","timestamp":"2026-10-27T11:00:00Z"}`)
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.NotificationID != "child-1" || event.FanoutID != "fan-1" || event.Channel != ChannelTelegram {
+		t.Fatalf("event = %+v", event)
 	}
 }
