@@ -619,6 +619,11 @@ Requests with a missing, malformed or wrong signature get a `401` and never reac
 comparison is constant time. For a body you already have (a queue consumer, another framework), use
 the one-shot `notifier.VerifySignature(secret, body, header)`.
 
+The secret is the API key's `webhook_secret`, returned **once** as `webhook_secret` when the key is
+created or rotated. An older key that has no webhook secret cannot sign callbacks; rotate it and
+store the new secret. A per-notification `callback_url` does not need a tenant-level webhook URL:
+the status worker signs it with any tenant key that has a webhook secret.
+
 Each **non-skipped child** of a route send produces its own callback: `notification_id` is the
 child's id, `channel_type` is that leg's channel, and `fanout_id` is the route send. A
 single-channel notification omits `fanout_id`. The callback is a terminal outcome
