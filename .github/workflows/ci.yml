@@ -71,13 +71,15 @@ jobs:
         with:
           go-version: stable
 
+      # Install from source with the current toolchain. The prebuilt v1.64.8 binary
+      # was built with Go 1.24 and refuses this module's go 1.26.8 floor; building it
+      # here with the same Go the tests use avoids that mismatch.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+
       # Pinned: the config in .golangci.yml uses the v1 schema.
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.8
-          install-mode: goinstall
-          args: --timeout=3m
+      - name: Run golangci-lint
+        run: $(go env GOPATH)/bin/golangci-lint run --timeout=3m
 
   benchmarks:
     name: Benchmarks
