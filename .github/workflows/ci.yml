@@ -69,9 +69,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          # Match the go.mod floor. golangci-lint v1.64.8 predates Go 1.27 and its
+          # package loader does not understand that toolchain's export data.
+          go-version: '1.26.8'
 
-      # Install from source with the current toolchain. The prebuilt v1.64.8 binary
+      # Install from source with the project toolchain. The prebuilt v1.64.8 binary
       # was built with Go 1.24 and refuses this module's go 1.26.8 floor; building it
       # here with the same Go the tests use avoids that mismatch.
       - name: Install golangci-lint
