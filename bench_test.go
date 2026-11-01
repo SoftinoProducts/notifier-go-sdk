@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // benchServer is a realistic local API: it decodes the request body and answers with a
@@ -180,14 +182,17 @@ func BenchmarkSignatureVerifierVerify(b *testing.B) {
 	}
 
 	body := []byte(`{"id":"9f1a2b3c","status":"delivered","recipient":"+989120000000"}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
 	mac.Write(body)
 	header := signaturePrefix + hex.EncodeToString(mac.Sum(nil))
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if !verifier.Verify(body, header) {
+		if err := verifier.Verify(body, timestamp, header); err != nil {
 			b.Fatal("signature rejected")
 		}
 	}

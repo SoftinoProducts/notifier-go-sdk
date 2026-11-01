@@ -592,9 +592,10 @@ service then answers `409 Conflict` instead of accepting a duplicate — and ret
 
 ## Receiving callbacks
 
-Notifier signs delivery callbacks with HMAC-SHA256 over the exact request body and sends the digest
-in `X-Notifier-Signature` as `sha256=<hex>`. `SignatureVerifier` authenticates them and restores the
-body for your handler:
+Notifier signs delivery callbacks with HMAC-SHA256 over **`<timestamp>.<raw body>`** and sends the
+digest in `X-Notifier-Signature` as `sha256=<hex>`, with the timestamp (Unix seconds) in
+`X-Notifier-Timestamp`. `SignatureVerifier` authenticates them and restores the body for your
+handler:
 
 ```go
 verifier, err := notifier.NewSignatureVerifier(os.Getenv("NOTIFIER_WEBHOOK_SECRET"))
@@ -615,9 +616,41 @@ http.Handle("/notifier/callback", verifier.Handler(func(w http.ResponseWriter, r
 }))
 ```
 
-Requests with a missing, malformed or wrong signature get a `401` and never reach your handler. The
-comparison is constant time. For a body you already have (a queue consumer, another framework), use
-the one-shot `notifier.VerifySignature(secret, body, header)`.
+Requests with a missing, malformed or wrong signature get a `401` and never reach your handler, as
+does a request whose signed timestamp is outside the tolerance window (`5m` by default, adjustable
+with `WithTimestampTolerance`). The comparison is constant time. For a body you already have (a
+queue consumer, another framework), use the one-shot
+`notifier.VerifySignature(secret, body, timestamp, header)`.
+
+**The digest covers the bytes exactly as they arrived.** Verify before decoding the JSON: decoding
+and re-encoding changes whitespace and field order, and the signature will never match. A receiver
+that signs the body alone (without the timestamp) is rejected — that scheme was the old contract and
+it let a captured callback be replayed forever.
+
+The signed material is:
+
+```text
+HMAC-SHA256(webhook_secret, "<X-Notifier-Timestamp>.<raw request body>")
+X-Notifier-Signature: sha256=<lowercase hex>
+```
+
+A fixed vector you can use to check an implementation in any language:
+
+```text
+secret    = whsec_test_secret
+timestamp = 1730000000
+body      = {"notification_id":"801e8e60-4686-4cba-8068-e36c88618b16","status":"delivered","channel_type":"telegram"}
+signature = 79c471e9051eb5cb40beba0463903244d673cd74a0361ab9114daece83c38114
+```
+
+`sha256=6e3cc01bb604f7cd43b6a4b6ec86456ec0853155581b3f70a03e2d9ccc6c3ba6` is the same body signed
+without the timestamp; it must be refused.
+
+**Upgrading from the previous verifier:** `VerifySignature` and `SignatureVerifier.Verify` now take
+the timestamp and return an `error`. The old two-argument forms verified the body alone, which the
+service never sent, so they rejected every real callback; they were removed rather than deprecated.
+Existing code fails to compile, which is the intent — a version that silently kept verifying the old
+way would keep returning `401` in production.
 
 The secret is the API key's `webhook_secret`, returned **once** as `webhook_secret` when the key is
 created or rotated. An older key that has no webhook secret cannot sign callbacks; rotate it and

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -197,11 +198,16 @@ func ExampleSignatureVerifier_Handler() {
 		_, _ = w.Write(body)
 	})
 
-	// A request as the service would send it.
+	// A request as the service would send it: the digest covers "<timestamp>.<body>",
+	// and the timestamp travels in X-Notifier-Timestamp.
 	payload := `{"id":"abc","status":"delivered"}`
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
 	mac.Write([]byte(payload))
 	signed := httptest.NewRequest(http.MethodPost, "/notifier/callback", strings.NewReader(payload))
+	signed.Header.Set(notifier.TimestampHeader, timestamp)
 	signed.Header.Set(notifier.SignatureHeader, "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	recorder := httptest.NewRecorder()
 	handler(recorder, signed)
@@ -209,6 +215,7 @@ func ExampleSignatureVerifier_Handler() {
 
 	// The same request with a digest that does not match.
 	tampered := httptest.NewRequest(http.MethodPost, "/notifier/callback", strings.NewReader(`{"id":"abc","status":"failed"}`))
+	tampered.Header.Set(notifier.TimestampHeader, timestamp)
 	tampered.Header.Set(notifier.SignatureHeader, "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	recorder = httptest.NewRecorder()
 	handler(recorder, tampered)

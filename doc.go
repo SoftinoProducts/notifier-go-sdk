@@ -60,9 +60,13 @@
 //
 // # Receiving callbacks
 //
-// Notifier signs delivery callbacks with HMAC-SHA256 in the X-Notifier-Signature header.
-// Use SignatureVerifier to authenticate them, for example:
+// Notifier signs delivery callbacks with HMAC-SHA256 over "<timestamp>.<raw body>" and
+// sends the digest in X-Notifier-Signature ("sha256=<hex>") with the timestamp in
+// X-Notifier-Timestamp. Use SignatureVerifier to authenticate them, for example:
 //
 //	verifier, _ := notifier.NewSignatureVerifier(os.Getenv("NOTIFIER_WEBHOOK_SECRET"))
 //	http.Handle("/notifier/callback", verifier.Handler(myHandler))
+//
+// The verifier checks the timestamp against its tolerance window, so a captured callback
+// cannot be replayed later, and it rejects a digest that covers the body alone.
 package notifier
