@@ -86,6 +86,15 @@ type Notification struct {
 	SentAt            *time.Time `json:"sent_at,omitempty"`
 	Error             string     `json:"error,omitempty"`
 
+	// Carrier delivery detail from a provider status report. It is separate from Status:
+	// Status records that the provider accepted the message, while these fields record what
+	// the carrier did with it afterwards.
+	CarrierStatus       string     `json:"carrier_status,omitempty"`
+	CarrierStatusText   string     `json:"carrier_status_text,omitempty"`
+	CarrierReportedAt   *time.Time `json:"carrier_reported_at,omitempty"`
+	CarrierSource       string     `json:"carrier_source,omitempty"`
+	CarrierProviderCode int        `json:"carrier_provider_code,omitempty"`
+
 	// Simulated reports that this delivery was rehearsed rather than attempted: the provider
 	// was never contacted and the message was not sent.
 	Simulated bool `json:"simulated,omitempty"`
@@ -107,6 +116,7 @@ type CallbackEvent struct {
 	TenantID          string      `json:"tenant_id"`
 	Status            Status      `json:"status"`
 	Channel           ChannelType `json:"channel_type,omitempty"`
+	ChannelID         string      `json:"channel_id,omitempty"`
 	FanoutID          string      `json:"fanout_id,omitempty"`
 	Provider          string      `json:"provider,omitempty"`
 	ProviderMessageID string      `json:"provider_message_id,omitempty"`
