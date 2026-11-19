@@ -111,33 +111,36 @@ func TestParseRetryAfter(t *testing.T) {
 
 func TestErrorMessage(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want string
+		name   string
+		status int
+		body   string
+		want   string
 	}{
-		{"envelope", `{"error":"not found"}`, "not found"},
-		{"envelope with extra keys", `{"error":"invalid input","detail":"x"}`, "invalid input"},
-		{"empty", ``, "empty error response"},
-		{"whitespace", "  \n ", "empty error response"},
-		{"plain text", "upstream timeout", "upstream timeout"},
-		{"html error page", "<html>502</html>", "<html>502</html>"},
+		{"envelope", http.StatusNotFound, `{"error":"not found"}`, "not found"},
+		{"envelope with extra keys", http.StatusBadRequest, `{"error":"invalid input","detail":"x"}`, "invalid input"},
+		{"empty", http.StatusBadGateway, ``, "HTTP 502"},
+		{"whitespace", http.StatusBadGateway, "  \n ", "HTTP 502"},
+		{"plain text is not copied", http.StatusBadGateway, "upstream timeout", "HTTP 502"},
+		{"html error page is not copied", http.StatusBadGateway, "<html>502</html>", "HTTP 502"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := errorMessage([]byte(tc.body)); got != tc.want {
-				t.Errorf("errorMessage(%q) = %q, want %q", tc.body, got, tc.want)
+			if got := errorMessage(tc.status, []byte(tc.body)); got != tc.want {
+				t.Errorf("errorMessage(%d, %q) = %q, want %q", tc.status, tc.body, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestErrorMessage_TruncatesHugeBodies(t *testing.T) {
-	got := errorMessage([]byte(strings.Repeat("x", 5000)))
-	if len(got) > 520 {
-		t.Errorf("message length = %d, want it truncated", len(got))
+func TestErrorMessage_DoesNotLeakRenderedBodies(t *testing.T) {
+	const otp = "987654"
+	got := errorMessage(http.StatusInternalServerError,
+		[]byte(`<html>Your verification code is `+otp+`</html>`))
+	if got != "HTTP 500" {
+		t.Errorf("errorMessage = %q, want the generic status text", got)
 	}
-	if !strings.HasSuffix(got, "...") {
-		t.Errorf("truncated message should be marked, got %q", got[len(got)-10:])
+	if strings.Contains(got, otp) {
+		t.Fatal("error message leaked the OTP from a non-JSON response body")
 	}
 }
 

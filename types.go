@@ -34,6 +34,30 @@ const (
 	ChannelBale     ChannelType = "bale"
 )
 
+// Priority selects the dispatch lane for a single send.
+//
+// The service uses it to keep OTP/transactional traffic out of the bulk queue. The zero value
+// behaves like PriorityBulk; set PriorityHigh for OTP sends. Bulk sends are always bulk and
+// are never marked high.
+type Priority string
+
+const (
+	// PriorityBulk is the default lane for non-time-critical messages.
+	PriorityBulk Priority = "bulk"
+	// PriorityHigh is the reserved lane for OTP and transactional messages.
+	PriorityHigh Priority = "high"
+)
+
+// validate accepts the empty value (meaning bulk) and the two known lanes.
+func (p Priority) validate() error {
+	switch p {
+	case "", PriorityBulk, PriorityHigh:
+		return nil
+	default:
+		return invalidArgument("priority %q must be %q or %q", p, PriorityBulk, PriorityHigh)
+	}
+}
+
 // Status is the coarse lifecycle state of a notification.
 type Status string
 
@@ -189,9 +213,14 @@ type SendParams struct {
 	SendAt *time.Time
 	// CallbackURL receives the HMAC-signed delivery callback for this notification.
 	CallbackURL string
-	// IdempotencyKey makes the send safe to repeat. A route replay returns the existing
-	// fanout instead of creating a second one, so a retry cannot deliver twice.
+	// IdempotencyKey makes the send safe to repeat. It is sent both as the
+	// Idempotency-Key header and in the JSON body. The service can deduplicate only when
+	// it honours that header. Use NewIdempotencyKey to create one.
 	IdempotencyKey string
+
+	// Priority selects the dispatch lane. The zero value means PriorityBulk; use
+	// PriorityHigh for OTP so the message never queues behind bulk traffic.
+	Priority Priority
 	// Metadata is arbitrary JSON stored with the notification and echoed back when it is
 	// read. Use JSON to build it from a Go value.
 	Metadata json.RawMessage
@@ -239,6 +268,8 @@ type TemplateParams struct {
 	CallbackURL string
 	// IdempotencyKey makes the send safe to repeat.
 	IdempotencyKey string
+	// Priority selects the dispatch lane; see SendParams.Priority.
+	Priority Priority
 	// Metadata is arbitrary JSON stored alongside the notification.
 	Metadata json.RawMessage
 

@@ -11,6 +11,10 @@ service from your tenant's channel configuration.
 - **Idiomatic Go.** `context.Context` everywhere, functional options, typed errors, plain structs.
 - **Fast.** A shared connection pool tuned for concurrency, pooled response buffers, allocation-free
   parameter rendering, and bulk sends that fan out with bounded parallelism.
+- **Bounded non-blocking dispatch.** `Sender` adds HIGH/BULK queues, fixed workers, queue-full
+  backpressure, safe retries and graceful drain for request-path OTP sends.
+- **Idempotency and priority.** `NewIdempotencyKey`, `Idempotency-Key`/`X-Priority` headers and
+  `WithMaxConnsPerHost` keep retries and bursts under control.
 
 ```go
 client, err := notifier.NewClient(os.Getenv("NOTIFIER_API_KEY"))
@@ -564,6 +568,9 @@ Errors are typed. `errors.Is` classifies them and `errors.As` reaches the HTTP d
 | `ErrRateLimited` | 429 — see `APIError.RetryAfter`. |
 | `ErrUnavailable` | 503 — no channel available to route the message. |
 | `ErrServer` | Any other 5xx. |
+| `ErrQueueFull` | `Sender.Enqueue*` found the selected lane full; nothing was queued. Use `errors.As` for `*QueueFullError.RetryAfter`. |
+| `ErrSenderClosed` | The `Sender` has been closed and no longer accepts work. |
+| `ErrDrainTimeout` | `Sender.Close` reached its context deadline; remaining work was failed, not stranded. |
 
 ```go
 _, err := client.Status(ctx, id)
@@ -573,20 +580,27 @@ switch {
 case errors.Is(err, notifier.ErrNotFound):
     // unknown id
 case errors.Is(err, notifier.ErrRateLimited):
-    time.Sleep(err.(*notifier.APIError).RetryAfter) // or errors.As
+    var rateErr *notifier.APIError
+    if errors.As(err, &rateErr) && rateErr.RetryAfter > 0 {
+        // back off for rateErr.RetryAfter
+    }
 case errors.As(err, &apiErr):
     log.Printf("%s %s -> %d: %s (request id %s)",
         apiErr.Method, apiErr.Path, apiErr.StatusCode, apiErr.Message, apiErr.RequestID)
 }
 ```
 
-`APIError` also carries `Retryable()`, and the `X-Request-Id` from the response so a support request
-can be tied to the exact server-side log line.
+`APIError` also carries `Retryable()`, `RetryableSend(idempotencyKey)`, and the `X-Request-Id` so a
+support request can be tied to the exact server-side log line. `APIError.Message` is the service's
+`{"error": ...}` text or a generic `HTTP <status>`; **raw response bytes are never copied**, because
+a rendered notification body can contain an OTP. `IsPreSendError(err)` identifies transport
+failures that happened before a request could reach the hub (DNS, dial, TLS handshake), which are
+the only transport failures safe to retry without an idempotency key.
 
-**The SDK never retries a send on its own.** Repeating a request risks delivering the message twice,
-which is worse than not delivering it at all. If you want retries, set `IdempotencyKey` — the
-service then answers `409 Conflict` instead of accepting a duplicate — and retry on
-`APIError.Retryable()` yourself.
+`Client.Send`, `Client.SendTemplateByName` and `Client.Bulk` never retry on their own: repeating a
+request risks delivering the message twice, which is worse than not delivering it at all. The
+optional `Sender` applies a safe policy (see
+[Non-blocking dispatch](#non-blocking-dispatch-sender)).
 
 ---
 
@@ -674,6 +688,7 @@ client, err := notifier.NewClient(os.Getenv("NOTIFIER_API_KEY"),
     notifier.WithBaseURL("https://notifier.staging.internal"), // default: https://notifier-api.vibe.ir
     notifier.WithTimeout(10*time.Second),                      // default: 30s per round trip
     notifier.WithHTTPClient(myInstrumentedClient),              // e.g. an OpenTelemetry RoundTripper
+    notifier.WithMaxConnsPerHost(64),                           // bound sockets (SDK-owned transport only)
     notifier.WithUserAgent("trade-hub/1.4"),                    // default: notifier-go-sdk/<version> <go version>
 )
 ```
@@ -684,14 +699,250 @@ URL, so misconfiguration fails at boot rather than on the first message.
 
 ---
 
+## Non-blocking dispatch: Sender
+
+`Client.Send` blocks the calling goroutine until the hub answers. On an HTTP handler that means the
+request goroutine pays the full round trip, and on a slow or down hub it can pay up to
+`DefaultTimeout` (30s). Go goroutines are cheap, but a naive
+
+```go
+go client.Send(ctx, params) // do not do this in a request handler
+```
+
+is not a solution: it creates one goroutine and one potential connection per message, has no
+backpressure, and gives you no way to drain accepted work on shutdown. `Sender` is the bounded,
+lifecycle-aware equivalent of the Java SDK's `*AndForget`/`*Async` path.
+
+### Quick start
+
+```go
+client, err := notifier.NewClient(os.Getenv("NOTIFIER_API_KEY"))
+if err != nil {
+    return err
+}
+sender, err := notifier.NewSender(client, notifier.SenderOptions{
+    HighWorkers: 1, BulkWorkers: 2,
+    HighQueueSize: 1_000, BulkQueueSize: 10_000,
+    SendTimeout: 10 * time.Second,        // total per job, including retries
+    MaxRetries: 2,                        // 0 selects 2; negative disables
+    RetryAmbiguous: false,                // true only after the hub honours Idempotency-Key
+    Listener: myListener,                 // optional
+})
+if err != nil {
+    return err
+}
+defer sender.Close(context.Background())
+
+key, err := notifier.NewIdempotencyKey()
+if err != nil {
+    return err
+}
+
+// OTP / request path: returns after a non-blocking queue offer.
+if err := sender.Enqueue(r.Context(), notifier.SendParams{
+    Channel:        notifier.ChannelSMS,
+    Recipient:      phone,
+    TemplateName:   "vibe:salerequest",
+    Values:         []string{otp},
+    Priority:       notifier.PriorityHigh,
+    IdempotencyKey: key,
+}); err != nil {
+    var full *notifier.QueueFullError
+    if errors.As(err, &full) {
+        // Nothing was queued. Wait full.RetryAfter or degrade deliberately.
+    }
+    return err
+}
+```
+
+`Enqueue` returns only local errors: `*QueueFullError` (`errors.Is(err, notifier.ErrQueueFull)`),
+`ErrSenderClosed`, an invalid-argument error, or a key-generation failure. Network failures never
+block or return from `Enqueue`; they are counted as dropped and reported to the `SendListener`.
+
+Use `EnqueueResult` when you need the notification id or a typed error without blocking:
+
+```go
+ch, err := sender.EnqueueResult(ctx, notifier.SendParams{
+    Channel: notifier.ChannelSMS, Recipient: phone, Body: "hello",
+})
+if err != nil { return err }
+go func() {
+    res := <-ch // exactly one result; the Sender closes the channel afterwards
+    if res.Err != nil {
+        log.Printf("send failed key=%s: %v", res.IdempotencyKey, res.Err)
+        return
+    }
+    log.Printf("queued id=%s attempts=%d", res.Notification.ID, res.Attempts)
+}()
+```
+
+### API map
+
+| Blocking | Result-bearing non-blocking | Fire-and-forget |
+|---|---|---|
+| `Client.Send(ctx, SendParams)` | `Sender.EnqueueResult(ctx, SendParams)` | `Sender.Enqueue(ctx, SendParams)` |
+| `Client.SendTemplateByName(ctx, TemplateParams)` | convert to `SendParams` and call `EnqueueResult` | convert and call `Enqueue` |
+| `Client.Bulk` / `BulkConcurrent` | already bounded by `BulkOptions.Concurrency`; no Sender lane | same |
+
+`Sender` deliberately has no goroutine-per-message variant and no unbounded worker pool. The
+worker count is the ceiling for concurrent hub requests, independent of send rate.
+
+### Lanes, queue full, and backpressure
+
+| Lane | Default workers | Default queue | Use |
+|---|---:|---:|---|
+| `PriorityHigh` | 1 | 1,000 | OTP and transactional sends |
+| `PriorityBulk` (zero value) | 2 | 10,000 | everything else |
+
+The lanes have independent queues and workers, so a bulk backlog cannot consume HIGH capacity. A
+full queue is refused immediately with `*QueueFullError`, which carries the lane, capacity and
+`RetryAfter`; the caller goroutine is never parked. A message is never silently dropped by the SDK:
+a fire-and-forget failure increments `Stats().Dropped`, and a result-bearing send gets the error on
+its channel.
+
+### Shutdown and guarantees
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+err := sender.Close(ctx) // idempotent; ErrDrainTimeout if the deadline was too short
+```
+
+`Close` (or an optional caller-side shutdown hook) does four things:
+
+1. rejects new `Enqueue` calls with `ErrSenderClosed`;
+2. waits for accepted jobs to settle, up to the context deadline;
+3. cancels in-flight requests and fails queued jobs with `ErrSenderClosed` if the deadline expires;
+4. stops all worker goroutines.
+
+Every `EnqueueResult` channel receives exactly one `SendResult`; a fire-and-forget job is counted
+in `Dropped`/`Failed`. `Sender.Close` does **not** close the shared `Client` or its transport.
+
+| Method | Caller waits | Guarantee |
+|---|---|---|
+| `Client.Send` | Full hub round trip | Hub acceptance; returns `*APIError`/transport error |
+| `Sender.Enqueue` | Only a queue offer | At-most-once; failures counted in `Dropped` |
+| `Sender.EnqueueResult` | Only a queue offer | Result channel receives hub acceptance or a typed error |
+| `EnqueueResult` + `IdempotencyKey` + retry | Only a queue offer | At-least-once from the SDK; duplicate-resistant when the hub honours the key |
+
+**Delivery to the handset is unchanged.** The hub and provider still decide when the SMS arrives;
+this removes the caller-side wait and goroutine/connection pressure, not delivery latency.
+
+### Metrics and listener
+
+`Sender.Stats()` returns:
+
+| Field | Meaning |
+|---|---|
+| `Accepted` / `Completed` / `Failed` | send counters |
+| `Retries` / `Rejected` / `Dropped` | retry, queue-full, and unobserved failures |
+| `InFlight` | jobs currently in a worker |
+| `HighQueueDepth` / `BulkQueueDepth` | instantaneous queue depth |
+
+`SendListener` is the Go equivalent of the Java listener: `OnAccepted`, `OnCompleted`, `OnRetry`,
+`OnRejected`, `OnDropped`. Callbacks run on worker goroutines, must be fast and thread-safe, and
+are recovered if they panic. `OnRejected` runs on the goroutine that called `Enqueue`, so it must
+also be fast. Without a listener, use `Stats()`; with OpenTelemetry, you can also instrument the
+`http.RoundTripper` passed to `WithHTTPClient`.
+
+---
+
+## Idempotency, priority, and retries
+
+### Idempotency
+
+```go
+key, err := notifier.NewIdempotencyKey() // 128-bit, 32 hex chars
+```
+
+Set the key in `SendParams.IdempotencyKey` (or `TemplateParams.IdempotencyKey`). The SDK sends it
+both in the JSON body and in the `Idempotency-Key` header, so the hub can deduplicate once it
+honours the header. A retry with the same key cannot deliver a second message when deduplication is
+active. `Sender` generates a key when the caller leaves it empty and exposes it on
+`SendResult.IdempotencyKey` and the listener's `SendEvent`.
+
+### Priority
+
+Set `SendParams.Priority` (or `TemplateParams.Priority`) to `PriorityHigh` for OTP. The SDK sends
+`X-Priority: high`; `PriorityBulk` sends `X-Priority: bulk`. `Client.Bulk` is always the bulk lane
+and never batches HIGH messages. The header only has an effect after the hub splits its queue by
+priority; until then it is an ignored, harmless header.
+
+### Retries
+
+`Client.Send` never retries. `Sender` retries only when the failure is safe:
+
+| Failure | `Client.Send` | `Sender` |
+|---|---|---|
+| DNS, TCP dial, TLS handshake | no | retries (pre-send, cannot duplicate) |
+| HTTP 429 | no | retries, honouring `Retry-After`, then exponential backoff with jitter |
+| HTTP 408 / 5xx | no | only when `RetryAmbiguous=true` **and** an idempotency key is set |
+| Read timeout / connection reset after write | no | only when `RetryAmbiguous=true` **and** an idempotency key is set |
+| 4xx (except 429) | no | never |
+
+`RetryAmbiguous` defaults to `false`. Leave it off until the hub de-duplicates on
+`Idempotency-Key`; then an ambiguous failure can be retried without creating a second SMS.
+`APIError.RetryableSend(key)` exposes the same rule for callers that implement their own policy,
+and `IsPreSendError(err)` identifies the always-safe transport failures.
+
+### Hub coordination
+
+Two wire features only take effect after the hub ships its side:
+
+1. **`Idempotency-Key` de-duplication** on `POST /v1/notifications`. Until then, set
+   `RetryAmbiguous=false` so Sender never retries a 408/5xx/read-timeout/connection-reset.
+2. **`X-Priority: high|bulk`** and a separate OTP lane in the hub queue. Until then the header is
+   ignored; `PriorityHigh` still keeps the message on the SDK's independent HIGH lane.
+
+For `BULK`, `Client.Bulk`/`BulkConcurrent` already batch up to `MaxBulkMessages` per request. HIGH
+messages are never batched by the SDK. A dedicated hub batch endpoint for bulk is a separate
+coordination item; the Go SDK does not invent one.
+
+### Bounded connections
+
+```go
+client, err := notifier.NewClient(apiKey,
+    notifier.WithMaxConnsPerHost(64),
+)
+```
+
+`WithMaxConnsPerHost` caps simultaneous connections in the SDK-owned transport. It cannot be
+combined with `WithHTTPClient`, because the SDK never mutates a caller-supplied client. This is a
+backstop for bursts against a slow hub; `Sender` worker counts provide the primary bound for
+fire-and-forget traffic.
+
+---
+
+## Timeouts and context
+
+Every client call takes a `context.Context`; its deadline and cancellation apply to the whole HTTP
+request, including reading the response body. `WithTimeout` adds a client-side per-round-trip cap
+(default 30s) on top; whichever expires first wins. For an OTP request path, use a short context
+rather than the global default:
+
+```go
+ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+defer cancel()
+_, err := client.SendTemplateByName(ctx, notifier.TemplateParams{...})
+```
+
+A `Sender` job is detached from the request context (`context.WithoutCancel`) so a fire-and-forget
+send is not cancelled when the HTTP handler returns; `SenderOptions.SendTimeout` (default 10s)
+bounds the whole job including retries. `Close` has its own context/deadline.
+
+---
+
 ## Concurrency and performance
 
-The client is designed for the way services actually call it: many goroutines, one client.
+The client is designed for the way services actually call it: many goroutines, one client. The
+optional `Sender` adds a fixed worker inventory on top when request-path fire-and-forget is needed.
 
 - Every call takes a `context.Context`; cancellation and deadlines propagate into the HTTP request.
 - Requests reuse a process-wide `http.Transport` derived from `http.DefaultTransport` with
   `MaxIdleConnsPerHost` raised from the stdlib's 2 to 32 — the stdlib default serializes concurrent
-  calls to the same API host. Pass `WithHTTPClient` to opt out.
+  calls to the same API host. Pass `WithHTTPClient` to opt out, or `WithMaxConnsPerHost` to cap
+  simultaneous connections in the SDK-owned transport.
+- `Sender` uses fixed worker counts and bounded queues; it never creates a goroutine per message.
 - Response buffers come from a `sync.Pool`. Request bodies deliberately do not: bytes backing a
   request body must stay valid past `Do` on an early response, so borrowing them from a pool would
   be a data race waiting to happen.
@@ -725,8 +976,9 @@ make bench       # benchmarks
 make coverage    # coverage report
 ```
 
-The unit tests run against `httptest` servers and need no network. The live tests hit a real
-deployment and are **skipped** unless a key is configured:
+The unit tests run against `httptest` servers and need no network. They include an end-to-end
+flow (`Sender` + `Client` + status + close) and race/10k-load tests, all run by `make check`.
+The live tests hit a real deployment and are **skipped** unless a key is configured:
 
 ```bash
 # Read-only: history plus the 404 contract.
@@ -757,6 +1009,24 @@ surface directly. The mapping is mechanical.
 | `api.listNotifications(query)` | `client.History(ctx, notifier.HistoryQuery{…})` |
 | `catch (ApiException e)` | `errors.Is(err, notifier.ErrConflict)` / `errors.As(err, &apiErr)` |
 | `SendOptions.builder()…build()` | fields on `notifier.SendParams` |
+| `api.verifyLookupAndForget(...)` / `verifyLookupAsync(...)` | `sender.Enqueue(...)` / `sender.EnqueueResult(...)` with `Priority: PriorityHigh` |
+
+### Migrating a request-path send to `Sender`
+
+1. Build one `Client` at startup, as today.
+2. Build one `Sender` with it; choose queue sizes and workers for the service, and a `SendTimeout`
+   matching the OTP budget (for example 5s).
+3. Replace the blocking `client.Send`/`SendTemplateByName` in the handler with `sender.Enqueue` (or
+   `EnqueueResult` when the notification id is needed).
+4. Set `PriorityHigh`, an `IdempotencyKey`, and (once the hub supports it) `RetryAmbiguous=true`.
+5. Handle only local `*QueueFullError`/`ErrSenderClosed` on the request path; observe network
+   failures through `SendListener`/`Stats`.
+6. Call `sender.Close` from your application shutdown sequence; the shared `Client` needs no close.
+7. Roll out one handler at a time. `Client.Send` stays available and unchanged.
+
+> **Compatibility note:** `SendParams` and `TemplateParams` gained a `Priority` field. Existing
+> code that uses **keyed** struct literals (`notifier.SendParams{Channel: ...}`) is unaffected;
+> unkeyed literals must be updated. Blocking calls otherwise keep their signatures and behavior.
 
 The `"group:template"` shorthand, positional `template_params`, and the "explicit group wins over the
 prefix" rule all behave exactly as they do in the Java SDK.

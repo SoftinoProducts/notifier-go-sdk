@@ -2,9 +2,12 @@ package notifier
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,8 +60,10 @@ func invalidArgument(format string, args ...any) error {
 type APIError struct {
 	// StatusCode is the HTTP status code returned by the service.
 	StatusCode int
-	// Message is the error text from the service's {"error": "..."} body, or the raw
-	// body when it was not valid JSON. It is never empty.
+	// Message is the error text from the service's {"error": "..."} body. When the body is
+	// absent, not JSON, or lacks that envelope it is a generic "HTTP <status>" string;
+	// response bytes are never copied here, because a rendered notification body can
+	// contain an OTP or other message content. It is never empty.
 	Message string
 	// RequestID is the value of the X-Request-Id response header, useful when reporting
 	// a problem to the service operators. Empty when the header is absent.
@@ -117,7 +122,8 @@ func (e *APIError) Is(target error) bool {
 }
 
 // Retryable reports whether the same request could plausibly succeed if it were sent
-// again. The SDK never retries on its own; this is a hint for the caller's own policy.
+// again. The SDK's Client never retries on its own; Sender applies the stricter
+// RetryableSend rule below. This is a hint for the caller's own policy.
 //
 // Retrying a send without an idempotency key risks delivering the message twice, so a
 // retryable status is not by itself a reason to resend.
@@ -134,11 +140,58 @@ func (e *APIError) Retryable() bool {
 	}
 }
 
+// RetryableSend reports whether retrying a send with this idempotency key is safe.
+//
+// A 429 is a rejection, so it is always safe to retry. A 408 or 5xx is ambiguous: the hub
+// may already have accepted the message, so it is safe only when the caller supplies an
+// idempotency key and the hub honours Idempotency-Key. An empty key therefore makes those
+// statuses non-retryable. Pre-send transport failures are not *APIError values; use
+// IsPreSendError for those.
+func (e *APIError) RetryableSend(idempotencyKey string) bool {
+	switch {
+	case e.StatusCode == http.StatusTooManyRequests:
+		return true
+	case e.StatusCode == http.StatusRequestTimeout || e.StatusCode >= 500:
+		return strings.TrimSpace(idempotencyKey) != ""
+	default:
+		return false
+	}
+}
+
+// IsPreSendError reports whether err is a transport failure that is known to have happened
+// before the request could reach the hub: DNS resolution, TCP dial, or a TLS handshake.
+//
+// Retrying those cannot duplicate a message. Any other transport error (read timeout,
+// connection reset after the request was written, EOF) is ambiguous and should be retried
+// only with an idempotency key and hub-side deduplication.
+func IsPreSendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && strings.EqualFold(opErr.Op, "dial") {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return true
+	}
+	var recordErr tls.RecordHeaderError
+	return errors.As(err, &recordErr)
+}
+
 // newAPIError builds an *APIError from a failed response.
 func newAPIError(resp *http.Response, method, path string, body []byte) *APIError {
 	return &APIError{
 		StatusCode: resp.StatusCode,
-		Message:    errorMessage(body),
+		Message:    errorMessage(resp.StatusCode, body),
 		RequestID:  resp.Header.Get("X-Request-Id"),
 		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		Method:     method,
@@ -146,12 +199,13 @@ func newAPIError(resp *http.Response, method, path string, body []byte) *APIErro
 	}
 }
 
-// errorMessage extracts the message from the service's {"error": "..."} envelope, falling
-// back to the trimmed raw body when the response was not the expected envelope.
-func errorMessage(body []byte) string {
+// errorMessage extracts the service's {"error": "..."} envelope. It never returns raw
+// response bytes: a fallback body can contain rendered notification content (an OTP, for
+// example), and exceptions/logs must not leak it.
+func errorMessage(status int, body []byte) string {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return "empty error response"
+		return fmt.Sprintf("HTTP %d", status)
 	}
 	var envelope struct {
 		Error string `json:"error"`
@@ -159,15 +213,7 @@ func errorMessage(body []byte) string {
 	if err := json.Unmarshal(trimmed, &envelope); err == nil && envelope.Error != "" {
 		return envelope.Error
 	}
-	return truncate(string(trimmed), 512)
-}
-
-// truncate shortens s to at most max bytes, marking that it was cut.
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
+	return fmt.Sprintf("HTTP %d", status)
 }
 
 // parseRetryAfter understands both forms allowed by RFC 9110: delta-seconds and HTTP-date.

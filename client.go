@@ -65,6 +65,12 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, errors.New("notifier: API key is required")
 	}
+	if cfg.maxConnsPerHost < 0 {
+		return nil, errors.New("notifier: max connections per host must not be negative")
+	}
+	if cfg.maxConnsPerHost > 0 && cfg.httpClient != nil {
+		return nil, errors.New("notifier: WithMaxConnsPerHost cannot be combined with WithHTTPClient")
+	}
 	base, err := normalizeBaseURL(cfg.baseURL, cfg.allowInsecureBaseURL)
 	if err != nil {
 		return nil, err
@@ -73,7 +79,7 @@ func NewClient(apiKey string, opts ...Option) (*Client, error) {
 	hc := cfg.httpClient
 	switch {
 	case hc == nil:
-		hc = &http.Client{Transport: defaultTransport(), Timeout: cfg.timeout}
+		hc = &http.Client{Transport: transportWithMaxConns(cfg.maxConnsPerHost), Timeout: cfg.timeout}
 	case cfg.timeoutSet:
 		// Never mutate a client the caller may share elsewhere.
 		clone := *hc
@@ -95,7 +101,14 @@ func (c *Client) BaseURL() string { return c.baseURL }
 // doJSON performs a request against baseURL+path and decodes the JSON response into out.
 // A nil out discards the response body, and a nil body sends no request payload.
 func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	req, err := c.newRequest(ctx, method, path, query, body)
+	return c.doJSONWithHeaders(ctx, method, path, query, nil, body, out)
+}
+
+// doJSONWithHeaders is doJSON plus per-request headers (idempotency, priority). The
+// headers are applied after the SDK's own headers and cannot replace X-API-Key.
+func (c *Client) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values,
+	headers http.Header, body, out any) error {
+	req, err := c.newRequest(ctx, method, path, query, headers, body)
 	if err != nil {
 		return err
 	}
@@ -107,7 +120,8 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 }
 
 // newRequest builds a request with the API key header and an encoded JSON payload.
-func (c *Client) newRequest(ctx context.Context, method, path string, query url.Values, body any) (*http.Request, error) {
+func (c *Client) newRequest(ctx context.Context, method, path string, query url.Values,
+	headers http.Header, body any) (*http.Request, error) {
 	target := c.baseURL + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -133,6 +147,14 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 	req.Header.Set("User-Agent", c.userAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		if strings.EqualFold(name, "X-API-Key") {
+			continue // never let a caller-supplied header replace the credential
+		}
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 	return req, nil
 }
@@ -181,13 +203,35 @@ var defaultTransport = sync.OnceValue(func() http.RoundTripper {
 	if !ok {
 		return http.DefaultTransport
 	}
+	return tunedTransport(base, 0)
+})
+
+// transportWithMaxConns returns the shared tuned transport when no per-client cap was
+// requested, or a private copy with MaxConnsPerHost set. Cloning preserves the stdlib
+// dial/TLS defaults and the SDK's idle-pool tuning.
+func transportWithMaxConns(maxConns int) http.RoundTripper {
+	if maxConns <= 0 {
+		return defaultTransport()
+	}
+	base := defaultTransport()
+	tr, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	return tunedTransport(tr, maxConns)
+}
+
+func tunedTransport(base *http.Transport, maxConns int) *http.Transport {
 	tuned := base.Clone()
 	tuned.MaxIdleConns = 200
 	tuned.MaxIdleConnsPerHost = 32
 	tuned.IdleConnTimeout = 90 * time.Second
 	tuned.ForceAttemptHTTP2 = true
+	if maxConns > 0 {
+		tuned.MaxConnsPerHost = maxConns
+	}
 	return tuned
-})
+}
 
 // defaultUserAgent identifies the SDK and the Go runtime to the service.
 func defaultUserAgent() string {

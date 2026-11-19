@@ -201,7 +201,8 @@ func (c *Client) sendBulkChunk(ctx context.Context, channel ChannelType, message
 
 	var out bulkResponse
 	req := bulkRequest{ChannelType: channel, Messages: wire, Simulated: simulated}
-	if err := c.doJSON(ctx, http.MethodPost, pathBulkNotifications, nil, req, &out); err != nil {
+	headers := http.Header{"X-Priority": []string{string(PriorityBulk)}}
+	if err := c.doJSONWithHeaders(ctx, http.MethodPost, pathBulkNotifications, nil, headers, req, &out); err != nil {
 		return nil, err
 	}
 	return &BulkBatch{BatchID: out.BatchID, Count: out.Count}, nil

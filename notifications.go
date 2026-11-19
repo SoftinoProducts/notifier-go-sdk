@@ -34,8 +34,17 @@ func (c *Client) Send(ctx context.Context, p SendParams) (*Notification, error) 
 	if err != nil {
 		return nil, err
 	}
+	headers := make(http.Header, 2)
+	if p.IdempotencyKey != "" {
+		headers.Set("Idempotency-Key", p.IdempotencyKey)
+	}
+	priority := p.Priority
+	if priority == "" {
+		priority = PriorityBulk
+	}
+	headers.Set("X-Priority", string(priority))
 	var out Notification
-	if err := c.doJSON(ctx, http.MethodPost, pathNotifications, nil, req, &out); err != nil {
+	if err := c.doJSONWithHeaders(ctx, http.MethodPost, pathNotifications, nil, headers, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -68,6 +77,7 @@ func (c *Client) SendTemplateByName(ctx context.Context, p TemplateParams) (*Not
 		SendAt:         p.SendAt,
 		CallbackURL:    p.CallbackURL,
 		IdempotencyKey: p.IdempotencyKey,
+		Priority:       p.Priority,
 		Metadata:       p.Metadata,
 		Simulated:      p.Simulated,
 	})
@@ -184,6 +194,9 @@ func (p SendParams) wire() (sendRequest, error) {
 			}
 			templateName = ""
 		}
+	}
+	if err := p.Priority.validate(); err != nil {
+		return sendRequest{}, err
 	}
 	if route == "" && p.Channel == "" {
 		return sendRequest{}, invalidArgument("channel or route is required")

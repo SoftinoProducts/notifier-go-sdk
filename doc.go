@@ -43,12 +43,21 @@
 //   - Every call takes a context.Context and respects its deadline and cancellation.
 //   - A Client is safe for concurrent use by multiple goroutines and is intended to be
 //     constructed once and reused for the lifetime of the process.
-//   - Notable sends (Send, Bulk) are never retried automatically. The service is
-//     asynchronous: a duplicated request means a duplicated message. Callers that want
-//     retries should set SendParams.IdempotencyKey so the service can deduplicate them.
+//   - Client.Send and Client.Bulk never retry automatically. The service is asynchronous:
+//     a duplicated request means a duplicated message. Set SendParams.IdempotencyKey (see
+//     NewIdempotencyKey) so the service can deduplicate a caller-driven retry. Sender, the
+//     optional bounded dispatcher, applies the safe retry policy described below.
+//   - Sender provides bounded HIGH/BULK queues and a fixed worker count for callers that
+//     must not wait for the hub on a request goroutine. Enqueue never blocks, and a full
+//     queue returns *QueueFullError instead of spawning a goroutine per message.
 //   - Errors are typed. Use errors.Is with the sentinel errors (ErrNotFound,
-//     ErrUnauthorized, ErrConflict, ErrRateLimited, ...) or errors.As with *APIError to
-//     reach the HTTP status, the request id, and Retry-After.
+//     ErrUnauthorized, ErrConflict, ErrRateLimited, ErrQueueFull, ErrSenderClosed, ...) or
+//     errors.As with *APIError to reach the HTTP status, the request id, and Retry-After.
+//     APIError.Message carries only the service's {"error": ...} envelope; raw response
+//     bytes are never copied, because they can contain rendered message content.
+//   - SendParams.Priority selects the HIGH/BULK lane. The SDK sends X-Priority and, when a
+//     key is set, Idempotency-Key on the wire. WithMaxConnsPerHost bounds socket use when a
+//     slow hub would otherwise let callers open an unbounded number of connections.
 //
 // # Performance
 //

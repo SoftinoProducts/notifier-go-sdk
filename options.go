@@ -6,7 +6,7 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent header.
-const Version = "0.5.1"
+const Version = "0.6.0"
 
 // config holds the resolved client configuration while options are applied.
 type config struct {
@@ -18,6 +18,7 @@ type config struct {
 	timeoutSet           bool
 	userAgent            string
 	httpClient           *http.Client
+	maxConnsPerHost      int
 }
 
 // Option configures a Client. Options are applied in order and a nil Option is ignored,
@@ -70,4 +71,15 @@ func WithHTTPClient(hc *http.Client) Option {
 // version and Go runtime version.
 func WithUserAgent(userAgent string) Option {
 	return func(c *config) { c.userAgent = userAgent }
+}
+
+// WithMaxConnsPerHost caps the number of simultaneous connections the SDK's default
+// transport opens to the API host, which bounds socket use when a slow or unavailable hub
+// would otherwise let a burst of goroutines open an unbounded number of connections.
+//
+// It applies only when the SDK creates the transport (no WithHTTPClient). A positive
+// value is required; combining it with WithHTTPClient is an error so the caller's client
+// is never silently modified.
+func WithMaxConnsPerHost(n int) Option {
+	return func(c *config) { c.maxConnsPerHost = n }
 }
